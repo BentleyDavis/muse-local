@@ -4,6 +4,7 @@ mod input;
 mod secret;
 
 use std::sync::Mutex;
+use tauri::Manager;
 
 // Built by `npm run build:control` (vite) into src-tauri/injected/control.js
 // and checked in, so the app always has an initialization script even when
@@ -35,7 +36,7 @@ fn open_settings(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Re
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
     win.eval(&format!("window.location.href={:?};", url))
-        .map_err(|e| e.to_string())
+        .map_err(|e: tauri::Error| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

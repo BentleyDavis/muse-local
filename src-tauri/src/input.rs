@@ -190,8 +190,8 @@ mod win {
         let mut rng = Lcg::new();
         let mut buf = [0u16; 2];
         for ch in text.chars() {
-            for &scan in ch.encode_utf16(&mut buf) {
-                key_press(scan)?;
+            for scan in ch.encode_utf16(&mut buf) {
+                key_press(*scan)?;
             }
             let mut delay = base_ms * (0.6 + rng.next_f64() * 0.8);
             if ch == ' ' {
@@ -232,8 +232,10 @@ mod win {
     }
 
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0 && wparam.0 as u32 == WM_MOUSEMOVE {
-            let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+        // Note: in windows-sys 0.59 WPARAM/LPARAM are primitive aliases
+        // (usize/isize), not tuple structs — no `.0` field access.
+        if code >= 0 && wparam as u32 == WM_MOUSEMOVE {
+            let info = &*(lparam as *const MSLLHOOKSTRUCT);
             if let Ok(mut st) = rec_state().lock() {
                 if st.active {
                     let start = *st.start.get_or_insert_with(Instant::now);
@@ -257,19 +259,20 @@ mod win {
                 }
             }
         }
-        CallNextHookEx(0, code, wparam, lparam)
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
     }
 
     fn ensure_hook_thread() {
         HOOK_THREAD.get_or_init(|| {
             std::thread::spawn(|| unsafe {
                 // WH_MOUSE_LL must live on a thread that pumps messages.
-                let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), 0, 0);
-                if hook == 0 {
+                let hook =
+                    SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), std::ptr::null_mut(), 0);
+                if hook.is_null() {
                     return;
                 }
                 let mut msg: MSG = std::mem::zeroed();
-                while GetMessageW(&mut msg, 0, 0, 0) > 0 {
+                while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
                     TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }

@@ -26,6 +26,7 @@ pub fn screenshot(window: tauri::Window) -> Result<Screenshot, String> {
 mod win {
     use super::Screenshot;
     use image::ImageEncoder;
+    use image::codecs::png::PngEncoder;
     use windows_sys::Win32::Graphics::Gdi::*;
 
     pub fn screenshot(window: &tauri::Window) -> Result<Screenshot, String> {
@@ -38,19 +39,19 @@ mod win {
         }
 
         unsafe {
-            let screen_dc = GetDC(0);
-            if screen_dc == 0 {
+            let screen_dc = GetDC(std::ptr::null_mut());
+            if screen_dc.is_null() {
                 return Err("GetDC failed".to_string());
             }
             let mem_dc = CreateCompatibleDC(screen_dc);
-            if mem_dc == 0 {
-                ReleaseDC(0, screen_dc);
+            if mem_dc.is_null() {
+                ReleaseDC(std::ptr::null_mut(), screen_dc);
                 return Err("CreateCompatibleDC failed".to_string());
             }
             let bmp = CreateCompatibleBitmap(screen_dc, w as i32, h as i32);
-            if bmp == 0 {
+            if bmp.is_null() {
                 DeleteDC(mem_dc);
-                ReleaseDC(0, screen_dc);
+                ReleaseDC(std::ptr::null_mut(), screen_dc);
                 return Err("CreateCompatibleBitmap failed".to_string());
             }
             let old = SelectObject(mem_dc, bmp);
@@ -66,7 +67,7 @@ mod win {
                 SRCCOPY,
             );
             SelectObject(mem_dc, old);
-            ReleaseDC(0, screen_dc);
+            ReleaseDC(std::ptr::null_mut(), screen_dc);
             if blt_ok == 0 {
                 DeleteObject(bmp);
                 DeleteDC(mem_dc);
@@ -121,7 +122,7 @@ mod win {
             let mut png = Vec::new();
             PngEncoder::new(&mut png)
                 .write_image(&img, w, h, image::ExtendedColorType::Rgb8)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e: image::ImageError| e.to_string())?;
 
             use base64::Engine as _;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
