@@ -101,6 +101,30 @@ fn reload_site(state: tauri::State<'_, AppState>) -> Result<(), String> {
     wv.reload().map_err(|e| e.to_string())
 }
 
+/// Ask the site page to push its buffered log lines back through Rust.
+/// This works even if the page's direct event.emit is blocked, as long as
+/// the page can invoke commands at all. If no lines arrive, the page's IPC
+/// is blocked (check the remote capability).
+#[tauri::command]
+fn site_pull_logs(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let wv = lock_webview(&state.site, "site")?;
+    wv.eval("window.__TAURI__.core.invoke('muse_site_logs',{lines:(window.__museLog||[]).splice(0)})")
+        .map_err(|e| e.to_string())
+}
+
+/// Receives log lines pulled from the site page; forwards them to the
+/// sidebar console.
+#[tauri::command]
+fn muse_site_logs(app: tauri::AppHandle, lines: Vec<String>) -> Result<(), String> {
+    for text in lines {
+        let _ = app.emit(
+            "muse-log",
+            serde_json::json!({ "source": "site", "level": "info", "text": text }),
+        );
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Seed Documents/muse-local/config.json from the bundled default on
@@ -130,6 +154,8 @@ pub fn run() {
             navigate_site,
             site_url,
             reload_site,
+            site_pull_logs,
+            muse_site_logs,
             config::get_config,
             config::save_config,
             config::set_firebase_token,

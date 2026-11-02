@@ -45,13 +45,20 @@ function invoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> 
 
 type LogLevel = "info" | "ok" | "warn" | "err";
 
+// Fallback log store, readable even if the page's event.emit is blocked:
+// the sidebar can pull these through Rust (see site_pull_logs).
+const __museLog: string[] = ((window as unknown as { __museLog?: string[] }).__museLog ??= []);
+
 // Ship log lines to the sidebar console via a Tauri event. Non-fatal if
 // the bridge isn't there (e.g. very early boot).
 function log(level: LogLevel, text: string): void {
+  const line = `[${new Date().toLocaleTimeString("en-US", { hour12: false })}] [site] ${text}`;
+  __museLog.push(line);
+  if (__museLog.length > 200) __museLog.shift();
   try {
     void __TAURI__?.event.emit("muse-log", { source: "site", level, text });
   } catch {
-    // ignore
+    // ignore — the sidebar can pull __museLog instead
   }
 }
 

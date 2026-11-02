@@ -300,6 +300,18 @@ async function render() {
     reloadBtn,
     reloadPageBtn
   );
+  const diagBtn = button("Pull site logs", false, true);
+  diagBtn.title = "Ask the site page for its buffered log lines (tests whether the page can reach the app at all)";
+  diagBtn.addEventListener("click", async () => {
+    try {
+      await invoke("site_pull_logs");
+      appendLog("sidebar", "info", "asked the site page for its logs — lines appear above if the page's IPC works");
+    } catch (e) {
+      say(String(e), true);
+    }
+  });
+  const diagRow = el("div", "", "display:flex;gap:8px;margin-top:6px;");
+  diagRow.append(diagBtn);
   const targetInput = textInput(cfg.targetUrl, "https://…");
   const applyBtn = button("Apply & open", true);
   applyBtn.addEventListener("click", async () => {
@@ -322,7 +334,7 @@ async function render() {
   });
   const applyRow = el("div", "", "display:flex;gap:8px;margin-top:6px;");
   applyRow.append(applyBtn);
-  siteSec.append(curRow, curUrl, row("Target URL", targetInput), applyRow);
+  siteSec.append(curRow, curUrl, row("Target URL", targetInput), applyRow, diagRow);
   box.append(siteSec);
 
   // ---- connection ----
