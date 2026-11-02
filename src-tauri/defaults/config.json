@@ -5,6 +5,8 @@
     "token": ""
   },
   "humanInput": {
+    "minWaitSeconds": 0.1,
+    "maxWaitSeconds": 10,
     "mouseSpeed": 1.0,
     "typingWpm": 55
   },

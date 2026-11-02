@@ -136,7 +136,7 @@ pub struct RecPoint {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingStatus {
-    active: bool,
+    pub(crate) active: bool,
     saved: usize,
     discarded: usize,
     current_points: usize,
@@ -152,7 +152,10 @@ pub struct RecordingStatus {
 mod win {
     use super::{PointerFrame, RecPoint, RecordingInfo, RecordingStatus, ScreenPoint, TimedPoint};
     use std::collections::VecDeque;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    };
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{
@@ -160,6 +163,27 @@ mod win {
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    const INPUT_MARKER: usize = 0x4D555345;
+
+    fn wait_native() -> Result<(), String> {
+        loop {
+            crate::input_lock::wait_until_running()?;
+            let foreground = unsafe { GetForegroundWindow() };
+            if let Some(hwnd) = *AUTOMATION_WINDOW.lock().map_err(|e| e.to_string())? {
+                if foreground == hwnd as HWND {
+                    return Ok(());
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
+    static AUTOMATION_WINDOW: Mutex<Option<isize>> = Mutex::new(None);
+
+    pub fn set_automation_window(hwnd: isize) -> Result<(), String> {
+        *AUTOMATION_WINDOW.lock().map_err(|e| e.to_string())? = Some(hwnd);
+        Ok(())
+    }
 
     pub fn cursor_position() -> Result<ScreenPoint, String> {
         let mut point = POINT { x: 0, y: 0 };
@@ -263,7 +287,7 @@ mod win {
                 | MOUSEEVENTF_VIRTUALDESK
                 | button_flag,
             time: 0,
-            dwExtraInfo: 0,
+            dwExtraInfo: INPUT_MARKER,
         })
     }
 
@@ -283,7 +307,7 @@ mod win {
             mouseData: 0,
             dwFlags: flag,
             time: 0,
-            dwExtraInfo: 0,
+            dwExtraInfo: INPUT_MARKER,
         })
     }
 
@@ -297,8 +321,10 @@ mod win {
         // fast. Only boundary clipping below changes the recorded trajectory.
         let speed = speed.clamp(0.25, 4.0);
         for p in points {
+            wait_native()?;
             // Recorded curves can overshoot even when both endpoints are safe.
             let (x, y) = frame.clamp(p.x, p.y);
+            wait_native()?;
             check(x, y)?;
             mouse_move_abs(x, y, 0)?;
             let dt = ((p.dt_ms as f64) / speed).round() as u64;
@@ -324,6 +350,7 @@ mod win {
         check(x, y)?;
         mouse_move_abs(x, y, 0)?;
         std::thread::sleep(std::time::Duration::from_millis(30));
+        wait_native()?;
         check(x, y)?;
         // Position and button-down are one input event, not a click at a
         // potentially different cursor position after the settling delay.
@@ -365,7 +392,7 @@ mod win {
                     KEYEVENTF_UNICODE
                 },
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: INPUT_MARKER,
             };
             let input = INPUT {
                 r#type: INPUT_KEYBOARD,
@@ -396,6 +423,7 @@ mod win {
         let mut rng = Lcg::new();
         let mut buf = [0u16; 2];
         for ch in text.chars() {
+            wait_native()?;
             for scan in ch.encode_utf16(&mut buf) {
                 key_press(*scan)?;
             }
@@ -497,7 +525,13 @@ mod win {
         if code >= 0 {
             let info = &*(lparam as *const MSLLHOOKSTRUCT);
             if info.flags & LLMHF_INJECTED != 0 {
+                if crate::input_lock::locked() && info.dwExtraInfo != INPUT_MARKER {
+                    return 1;
+                }
                 return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+            }
+            if crate::input_lock::locked() {
+                return 1;
             }
             if let Ok(mut st) = rec_state().lock() {
                 if st.active {
@@ -558,16 +592,56 @@ mod win {
     }
 
     unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0 && matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
+        static ESCAPE_DOWN: AtomicBool = AtomicBool::new(false);
+        static ESCAPE_HANDLED: AtomicBool = AtomicBool::new(false);
+        static WINDOWS_DOWN: AtomicBool = AtomicBool::new(false);
+        if code >= 0 {
             let info = &*(lparam as *const KBDLLHOOKSTRUCT);
-            if info.vkCode == u32::from(VK_ESCAPE) && info.flags & LLKHF_INJECTED == 0 {
-                if let Ok(mut st) = rec_state().lock() {
-                    if st.active {
-                        st.active = false;
-                        st.stopped_by = Some("Escape".to_string());
-                        finish_movement(&mut st, false);
-                    }
+            if info.flags & LLKHF_INJECTED != 0 {
+                if crate::input_lock::locked() && info.dwExtraInfo != INPUT_MARKER {
+                    return 1;
                 }
+                return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+            }
+            let down = matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+            if info.vkCode == u32::from(VK_LWIN) || info.vkCode == u32::from(VK_RWIN) {
+                WINDOWS_DOWN.store(down, Ordering::SeqCst);
+            }
+            if down
+                && info.vkCode == u32::from(b'L')
+                && WINDOWS_DOWN.load(Ordering::SeqCst)
+                && crate::input_lock::locked()
+            {
+                WINDOWS_DOWN.store(false, Ordering::SeqCst);
+                crate::input_lock::unlock();
+                if windows_sys::Win32::System::Shutdown::LockWorkStation() == 0 {
+                    crate::input_lock::fail("Windows session lock failed".to_string());
+                }
+                return 1;
+            }
+            if info.vkCode == u32::from(VK_ESCAPE) {
+                if down && !ESCAPE_DOWN.swap(true, Ordering::SeqCst) {
+                    WINDOWS_DOWN.store(false, Ordering::SeqCst);
+                    let mut handled = crate::input_lock::locked();
+                    crate::input_lock::unlock();
+                    if let Ok(mut st) = rec_state().lock() {
+                        if st.active {
+                            handled = true;
+                            st.active = false;
+                            st.stopped_by = Some("Escape".to_string());
+                            finish_movement(&mut st, false);
+                        }
+                    }
+                    ESCAPE_HANDLED.store(handled, Ordering::SeqCst);
+                } else if !down {
+                    ESCAPE_DOWN.store(false, Ordering::SeqCst);
+                }
+                if ESCAPE_HANDLED.load(Ordering::SeqCst) {
+                    return 1;
+                }
+            }
+            if crate::input_lock::locked() {
+                return 1;
             }
         }
         CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
@@ -663,6 +737,10 @@ mod win {
         }
     }
 
+    pub fn initialize_hooks() -> Result<(), String> {
+        ensure_hook_thread()
+    }
+
     fn ensure_hook_thread() -> Result<(), String> {
         HOOK_THREAD
             .get_or_init(|| {
@@ -703,6 +781,7 @@ mod win {
                         st.error = Some("Recording input hook stopped".to_string());
                         finish_movement(&mut st, true);
                     }
+                    crate::input_lock::fail("Native input hooks stopped; restart Muse".to_string());
                 });
                 receiver
                     .recv()
@@ -773,6 +852,12 @@ mod win {
     }
 
     pub fn start_recording(sidebar: tauri::Webview) -> Result<RecordingStatus, String> {
+        if !crate::input_lock::ready() {
+            return Err("input hooks are unavailable; restart Muse before recording".to_string());
+        }
+        if crate::input_lock::locked() {
+            return Err("unlock input with Escape before recording".to_string());
+        }
         ensure_hook_thread()?;
         let excluded = sidebar_bounds(&sidebar)?;
         let mut st = rec_state().lock().map_err(|e| e.to_string())?;
@@ -809,11 +894,17 @@ mod win {
         recording_status()
     }
 
-    pub fn delete_recording(id: &str) -> Result<(), String> {
-        if id.contains('/') || id.contains('\\') || id.contains("..") {
-            return Err("bad recording id".to_string());
+    fn recording_path(id: &str) -> Result<std::path::PathBuf, String> {
+        if id.is_empty()
+            || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        {
+            return Err("invalid recording id".to_string());
         }
-        let path = recordings_dir()?.join(format!("{}.json", id));
+        Ok(recordings_dir()?.join(format!("{}.json", id)))
+    }
+
+    pub fn delete_recording(id: &str) -> Result<(), String> {
+        let path = recording_path(id)?;
         std::fs::remove_file(&path).map_err(|e| e.to_string())
     }
 
@@ -821,7 +912,8 @@ mod win {
         let dir = recordings_dir()?;
         let mut out = Vec::new();
         let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("cannot read recording entry: {e}"))?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -831,16 +923,22 @@ mod win {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            let (count, length) = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<Vec<RecPoint>>(&raw).ok())
-                .map(|pts| (pts.len(), path_length(&pts)))
-                .unwrap_or((0, 0.0));
+            recording_path(&id)?;
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read recording {id}: {e}"))?;
+            let points: Vec<RecPoint> = serde_json::from_str(&raw)
+                .map_err(|e| format!("invalid recording {id}: {e}"))?;
+            let metadata = entry.metadata().map_err(|e| format!("recording {id}: {e}"))?;
+            let created = metadata.created().or_else(|_| metadata.modified())
+                .map_err(|e| format!("recording {id} timestamp: {e}"))?
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| format!("recording {id} timestamp: {e}"))?
+                .as_millis().to_string();
             out.push(RecordingInfo {
                 id,
-                points: count,
-                length_px: length,
-                created: String::new(),
+                points: points.len(),
+                length_px: path_length(&points),
+                created,
             });
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -848,17 +946,21 @@ mod win {
     }
 
     pub fn load_recording(id: &str) -> Result<Vec<RecPoint>, String> {
-        if id.contains(['/', '\\', '.', ':']) {
-            return Err("invalid recording id".to_string());
-        }
-        let path = recordings_dir()?.join(format!("{}.json", id));
+        let path = recording_path(id)?;
         let raw =
-            std::fs::read_to_string(&path).map_err(|_| format!("recording not found: {}", id))?;
+            std::fs::read_to_string(&path).map_err(|e| format!("cannot read recording {id}: {e}"))?;
         serde_json::from_str(&raw).map_err(|e| e.to_string())
     }
 }
 
 // ---------- Tauri commands ----------
+
+pub fn initialize_hooks() -> Result<(), String> {
+    #[cfg(windows)]
+    return win::initialize_hooks();
+    #[cfg(not(windows))]
+    Err("input protection is only supported on Windows".to_string())
+}
 
 #[tauri::command]
 pub async fn pointer_geometry(
@@ -918,6 +1020,7 @@ pub async fn mouse_path(
     {
         let hwnd = site.window().hwnd().map_err(|e| e.to_string())?.0 as isize;
         return crate::run_blocking(move || {
+            win::set_automation_window(hwnd)?;
             if site_frame(&site)? != frame {
                 return Err("webpage geometry changed; resolve the target again".to_string());
             }
@@ -952,6 +1055,7 @@ pub async fn click_at(
     {
         let hwnd = site.window().hwnd().map_err(|e| e.to_string())?.0 as isize;
         return crate::run_blocking(move || {
+            win::set_automation_window(hwnd)?;
             win::click_at(x, y, &button, |x, y| {
                 check_pointer(&site, &frame, hwnd, x, y)
             })
@@ -966,9 +1070,23 @@ pub async fn click_at(
 }
 
 #[tauri::command]
-pub async fn type_text(text: String, wpm: f64) -> Result<(), String> {
+pub async fn type_text(
+    state: tauri::State<'_, crate::AppState>,
+    text: String,
+    wpm: f64,
+) -> Result<(), String> {
     #[cfg(windows)]
-    return crate::run_blocking(move || win::type_text(&text, wpm)).await;
+    {
+        let site = crate::lock_webview(&state.site, "site")?;
+        let hwnd = site.window().hwnd().map_err(|e| e.to_string())?.0 as isize;
+        return crate::run_blocking(move || {
+            win::set_automation_window(hwnd)?;
+            crate::input_lock::wait_until_running()?;
+            site.set_focus().map_err(|e| e.to_string())?;
+            win::type_text(&text, wpm)
+        })
+        .await;
+    }
     #[cfg(not(windows))]
     {
         let _ = (&text, &wpm);

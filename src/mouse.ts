@@ -21,7 +21,7 @@ export interface RecSummary {
   id: string;
   points: number;
   lengthPx: number;
-  created: string;
+  created: string; // Unix epoch milliseconds; filesystem modified time if creation time is unavailable.
 }
 
 export interface TimedOut {

@@ -1,6 +1,7 @@
 mod capture;
 mod config;
 mod input;
+mod input_lock;
 mod secret;
 
 use std::{collections::HashMap, sync::Mutex, time::Duration};
@@ -58,14 +59,17 @@ fn lock_webview(
 
 /// Re-split the window: sidebar `sidebar_w` px on the left, site takes the
 /// rest. Used at startup, on window resize, and while dragging the divider.
-fn apply_layout(state: tauri::State<'_, AppState>, sidebar_w: u32) -> Result<(), String> {
+fn clamped_sidebar_width(width: u32, window_width: u32) -> u32 {
+    width.clamp(MIN_SIDEBAR_W, MAX_SIDEBAR_W)
+        .min(window_width.saturating_sub(200))
+}
+
+fn apply_layout(state: tauri::State<'_, AppState>, sidebar_w: u32) -> Result<u32, String> {
     let sidebar = lock_webview(&state.sidebar, "sidebar")?;
     let site = lock_webview(&state.site, "site")?;
     let window = site.window();
     let size = window.inner_size().map_err(|e| e.to_string())?;
-    let w = sidebar_w
-        .clamp(MIN_SIDEBAR_W, MAX_SIDEBAR_W)
-        .min(size.width.saturating_sub(200));
+    let w = clamped_sidebar_width(sidebar_w, size.width);
     sidebar
         .set_size(tauri::PhysicalSize::new(w, size.height))
         .map_err(|e| e.to_string())?;
@@ -76,7 +80,7 @@ fn apply_layout(state: tauri::State<'_, AppState>, sidebar_w: u32) -> Result<(),
         size.height,
     ))
     .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(w)
 }
 
 /// Drag handler for the sidebar divider. Returns the clamped width so the
@@ -86,8 +90,7 @@ fn apply_layout(state: tauri::State<'_, AppState>, sidebar_w: u32) -> Result<(),
 fn set_sidebar_width(state: tauri::State<'_, AppState>, width: u32) -> Result<u32, String> {
     let w = width.clamp(MIN_SIDEBAR_W, MAX_SIDEBAR_W);
     *state.sidebar_width.lock().map_err(|e| e.to_string())? = w;
-    apply_layout(state, w)?;
-    Ok(w)
+    apply_layout(state, w)
 }
 
 fn clear_navigation(state: &AppState, id: &str) -> Result<(), String> {
@@ -344,6 +347,10 @@ pub fn run() {
             input::start_recording,
             input::stop_recording,
             input::recording_status,
+            input_lock::input_lock_status,
+            input_lock::set_input_locked,
+            input_lock::wait_for_automation,
+            input_lock::input_activity,
             input::list_recordings,
             input::load_recording,
             input::delete_recording,
@@ -355,6 +362,7 @@ pub fn run() {
                 .inner_size(1440.0, 900.0)
                 .build()?;
             let size = window.inner_size()?;
+            let initial_w = clamped_sidebar_width(initial_w, size.width);
 
             // Sidebar: the app's own control panel — settings, recordings,
             // connection test. This pane is "the app".
@@ -450,6 +458,11 @@ pub fn run() {
             // window on resize using the current (possibly dragged) width.
             let app_h = app.handle().clone();
             window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                    input_lock::unlock();
+                    app_h.exit(0);
+                    return;
+                }
                 if let tauri::WindowEvent::Resized(_) = event {
                     let state = app_h.state::<AppState>();
                     let w = state
@@ -461,6 +474,10 @@ pub fn run() {
                 }
             });
 
+            input_lock::install_indicator(app.handle()).map_err(std::io::Error::other)?;
+            if let Err(error) = input_lock::initialize() {
+                input_lock::fail(error);
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

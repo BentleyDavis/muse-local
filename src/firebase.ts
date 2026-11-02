@@ -230,6 +230,7 @@ interface ChannelOptions {
   sessionId: string;
   queue: SerialQueue;
   execute: (command: Command) => Promise<unknown>;
+  beforeExecute?: (command: Command) => Promise<void>;
   onStatus: (level: LogLevel, message: string) => void;
   onHistory: (entries: QueueEntry[]) => void;
   fetcher?: typeof fetch;
@@ -632,6 +633,7 @@ export class FirebaseChannel {
       this.key(id),
       async () => {
         if (stage === "start") {
+          await this.options.beforeExecute?.(command);
           const started = await this.updateOwned(id, state.attemptId, (current, record) => {
             if (
               current.status === "failed" &&

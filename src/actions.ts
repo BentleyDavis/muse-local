@@ -40,6 +40,8 @@ interface ActionArgs {
 interface HumanInput {
   typingWpm: number;
   mouseSpeed: number;
+  minWaitSeconds: number;
+  maxWaitSeconds: number;
 }
 
 export interface ActionContext {
@@ -364,6 +366,12 @@ registerAction("sequence", async (args, context, depth) => {
   return { results };
 });
 
+export async function waitForAction(action: string): Promise<void> {
+  if (!["rec_start", "rec_stop", "rec_status", "recordings"].includes(action)) {
+    await invoke("wait_for_automation");
+  }
+}
+
 export async function executeAction(
   action: string,
   args: unknown,
@@ -372,5 +380,15 @@ export async function executeAction(
 ): Promise<unknown> {
   const handler = handlers.get(action);
   if (!handler) throw new Error(`unknown action: ${action}`);
+  await waitForAction(action);
+  if (action === "move_to" || action === "mouse" || action === "click") {
+    const { minWaitSeconds: min, maxWaitSeconds: max } = await context.humanInput();
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max > 10 || min > max) {
+      throw new Error("Movement/click waits must satisfy 0 <= shortest <= longest <= 10 seconds.");
+    }
+    const delayMs = (min + Math.random() * (max - min)) * 1000;
+    await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    await waitForAction(action);
+  }
   return handler(objectArgs(args), context, depth);
 }

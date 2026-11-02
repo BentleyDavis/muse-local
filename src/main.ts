@@ -1,16 +1,19 @@
 // The trusted local sidebar owns the command channel and dispatches page
 // actions through Rust; the remote site never owns app credentials or actions.
 import { invoke } from "@tauri-apps/api/core";
-import { executeAction, type ActionContext } from "./actions";
+import { executeAction, waitForAction, type ActionContext } from "./actions";
 import { FirebaseChannel, SerialQueue, type QueueEntry } from "./firebase";
 import { createRecordingPage } from "./recording-page";
 import { button, el, section } from "./ui";
+import { createInputLockPanel } from "./input-lock";
 
 const VERSION = "0.2.0";
 
 interface HumanInput {
   typingWpm: number;
   mouseSpeed: number;
+  minWaitSeconds: number;
+  maxWaitSeconds: number;
 }
 
 interface LocalConfig {
@@ -24,7 +27,7 @@ interface LocalConfig {
 const DEFAULTS: LocalConfig = {
   version: 1,
   firebase: { databaseURL: "", node: "muse", token: "" },
-  humanInput: { typingWpm: 55, mouseSpeed: 1.0 },
+  humanInput: { typingWpm: 55, mouseSpeed: 1.0, minWaitSeconds: 0.1, maxWaitSeconds: 10 },
   targetUrl: "https://messages.google.com/web",
   sidebarWidth: 400,
 };
@@ -192,6 +195,10 @@ let queueSummary: HTMLElement | null = null;
 let queueList: HTMLElement | null = null;
 
 function renderCommandQueue(entries: QueueEntry[]): void {
+  void invoke("input_activity", {
+    action: entries.find((entry) => entry.status === "running")?.action ?? "",
+    queued: entries.filter((entry) => entry.status === "queued").length,
+  }).catch((error: unknown) => appendLog("input", "err", String(error)));
   if (!queueSummary || !queueList) return;
   const labels: Record<QueueEntry["status"], string> = {
     pending: "Awaiting classification",
@@ -263,6 +270,7 @@ async function refreshFirebaseChannel(): Promise<void> {
     config: cfg.firebase,
     sessionId: commandSessionId,
     queue: commandQueue,
+    beforeExecute: (command) => waitForAction(command.action),
     execute: (cmd) => executeAction(cmd.action, cmd.args, actionContext),
     onStatus: (level, message) => appendLog("firebase", level, message),
     onHistory: (entries) => {
@@ -330,14 +338,17 @@ async function render() {
   box.setAttribute("aria-label", "Settings");
   const content = el("main", "", "flex:1;overflow-y:auto;min-height:0;");
   let recordingPage: ReturnType<typeof createRecordingPage> | null = null;
-  const ready = cfg.firebase.databaseURL.startsWith("https://") && !!cfg.firebase.token;
+  const updateReady = (config: LocalConfig) => {
+    const ready = config.firebase.databaseURL.startsWith("https://") && !!config.firebase.token;
+    st.replaceChildren(statusDot(ready), el("span", ready ? "ready" : "setup needed"));
+  };
 
   // header
   const head = el("div", "", "display:flex;align-items:center;gap:8px;margin-bottom:2px;");
   head.append(el("strong", "Muse Local", "font-size:15px;"));
   head.append(el("span", `v${VERSION}`, "font-size:11px;color:#9aa3b2;"));
   const st = el("div", "", "display:flex;align-items:center;font-size:12px;color:#9aa3b2;margin:4px 0 2px;");
-  st.append(statusDot(ready), el("span", ready ? "ready" : "setup needed"));
+  updateReady(cfg);
   sayEl = el("p", "", "font-size:12px;min-height:18px;margin:6px 0 0;");
   box.append(head, st, sayEl);
 
@@ -393,6 +404,7 @@ async function render() {
       // connection fields above is never silently discarded.
       const next = await collectForm();
       await invoke("save_config", { config: { ...next, firebase: { ...next.firebase, token: "" } } });
+      updateReady(next);
       await refreshFirebaseChannel();
       const finalUrl = await invoke<string>("site_navigate", { url: parsed.toString() });
       say(`Settings saved. Showing ${finalUrl}`);
@@ -423,6 +435,7 @@ async function render() {
   const tokenState = el("p", "", "font-size:12px;color:#9aa3b2;margin:4px 0;");
   const refreshTokenState = async () => {
     const c = await currentConfig();
+    updateReady(c);
     tokenState.textContent = c.firebase.token
       ? "Token is set ✓ (Windows Credential Manager)"
       : "No token set — commands cannot be received.";
@@ -469,12 +482,16 @@ async function render() {
   const humSec = section("Human input");
   const [wpmSlider] = slider(15, 160, 1, cfg.humanInput.typingWpm, (v) => `${v} wpm`);
   const [speedSlider] = slider(0.25, 4, 0.05, cfg.humanInput.mouseSpeed, (v) => `${v.toFixed(2)}×`);
+  const [minWaitSlider] = slider(0, 10, 0.1, cfg.humanInput.minWaitSeconds, (v) => `${v.toFixed(1)} s`);
+  const [maxWaitSlider] = slider(0, 10, 0.1, cfg.humanInput.maxWaitSeconds, (v) => `${v.toFixed(1)} s`);
   humSec.append(row("Typing speed", wpmSlider.parentElement!));
   humSec.append(row("Mouse replay tempo", speedSlider.parentElement!));
+  humSec.append(row("Shortest wait", minWaitSlider.parentElement!));
+  humSec.append(row("Longest wait", maxWaitSlider.parentElement!));
   humSec.append(
     el(
       "p",
-      "Typing adds natural variance and thinking pauses. Mouse replays transform your real recorded movements; tempo only scales speed, never the path.",
+      "Typing adds natural variance and thinking pauses. Mouse tempo scales recorded movement speed, never the path. A fresh random wait in this range precedes each native movement or click, including sequence steps. Equal values give a fixed wait; both zero disable it.",
       "font-size:11px;color:#9aa3b2;margin:4px 0 0;"
     )
   );
@@ -487,6 +504,11 @@ async function render() {
     base.targetUrl = targetInput.value.trim();
     base.humanInput.typingWpm = Number(wpmSlider.value);
     base.humanInput.mouseSpeed = Number(speedSlider.value);
+    base.humanInput.minWaitSeconds = Number(minWaitSlider.value);
+    base.humanInput.maxWaitSeconds = Number(maxWaitSlider.value);
+    if (base.humanInput.minWaitSeconds > base.humanInput.maxWaitSeconds) {
+      throw new Error("Shortest wait must not exceed longest wait.");
+    }
     return base;
   };
   const saveBtn = button("Save settings", true);
@@ -497,6 +519,7 @@ async function render() {
         config: { ...next, firebase: { ...next.firebase, token: "" } },
       });
       await refreshFirebaseChannel();
+      await refreshTokenState();
       say("Settings saved.");
     } catch (e) {
       say(String(e), true);
@@ -561,7 +584,11 @@ async function render() {
 
   // Scrollable settings above, resizable console pinned to the bottom.
   content.append(box);
-  document.body.append(content, buildConsole());
+  document.body.append(
+    createInputLockPanel((message) => appendLog("input", "err", message)),
+    content,
+    buildConsole()
+  );
   installDragHandle();
 }
 
@@ -577,7 +604,7 @@ function installDragHandle() {
   const grip = el(
     "div",
     "",
-    "position:fixed;top:0;right:0;bottom:0;width:10px;cursor:ew-resize;z-index:50;"
+    "position:fixed;top:0;right:0;bottom:0;width:10px;cursor:ew-resize;z-index:50;touch-action:none;"
   );
   grip.id = "muse-divider";
   const line = el(
@@ -591,46 +618,58 @@ function installDragHandle() {
     if (!drag) line.style.background = "#2c313a";
   });
 
-  let drag: { startX: number; startW: number } | null = null;
+  let drag: { startX: number; startW: number; pointerId: number } | null = null;
   let lastPhysW = 0;
-  let rafQueued = false;
+  let raf: number | null = null;
   let latestCssW = 0;
+  let resizing: Promise<void> = Promise.resolve();
+  let finishing = false;
 
   const applyQueued = () => {
-    rafQueued = false;
+    raf = null;
     const phys = Math.max(1, Math.round(latestCssW * window.devicePixelRatio));
-    invoke<number>("set_sidebar_width", { width: phys })
-      .then((w) => {
-        lastPhysW = w;
-      })
-      .catch(() => {
-        // ignore mid-drag hiccups; the next frame retries
-      });
+    resizing = resizing.then(async () => {
+      lastPhysW = await invoke<number>("set_sidebar_width", { width: phys });
+    });
   };
 
-  grip.addEventListener("mousedown", (e) => {
-    drag = { startX: e.clientX, startW: document.documentElement.clientWidth };
+  grip.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || drag || finishing) return;
+    grip.setPointerCapture(e.pointerId);
+    resizing = Promise.resolve();
+    drag = { startX: e.clientX, startW: document.documentElement.clientWidth, pointerId: e.pointerId };
+    latestCssW = drag.startW;
     lastPhysW = Math.round(drag.startW * window.devicePixelRatio);
     line.style.background = "#1d4ed8";
     document.body.style.userSelect = "none";
     e.preventDefault();
   });
-  window.addEventListener("mousemove", (e) => {
-    if (!drag) return;
+  grip.addEventListener("pointermove", (e) => {
+    if (!drag || drag.pointerId !== e.pointerId) return;
     latestCssW = drag.startW + (e.clientX - drag.startX);
-    if (!rafQueued) {
-      rafQueued = true;
-      requestAnimationFrame(applyQueued);
+    if (raf === null) {
+      raf = requestAnimationFrame(() => {
+        applyQueued();
+        void resizing.catch((error) => say(String(error), true));
+      });
     }
   });
-  window.addEventListener("mouseup", () => {
-    if (!drag) return;
+  const finishDrag = (e: PointerEvent) => {
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    if (e.type === "pointerup") {
+      latestCssW = drag.startW + (e.clientX - drag.startX);
+    }
     drag = null;
+    finishing = true;
+    if (grip.hasPointerCapture(e.pointerId)) grip.releasePointerCapture(e.pointerId);
+    if (raf !== null) cancelAnimationFrame(raf);
+    applyQueued();
     line.style.background = "#2c313a";
     document.body.style.userSelect = "";
     // Persist the dragged width for the next launch.
     void (async () => {
       try {
+        await resizing;
         const cfg = await currentConfig();
         cfg.sidebarWidth = lastPhysW || cfg.sidebarWidth;
         await invoke("save_config", {
@@ -638,9 +677,14 @@ function installDragHandle() {
         });
       } catch (e) {
         say(String(e), true);
+      } finally {
+        finishing = false;
       }
     })();
-  });
+  };
+  grip.addEventListener("pointerup", finishDrag);
+  grip.addEventListener("pointercancel", finishDrag);
+  grip.addEventListener("lostpointercapture", finishDrag);
 
   document.body.append(grip);
 }

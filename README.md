@@ -71,6 +71,10 @@ they're identifiers, not secrets.
 
 The left pane is the app — no JSON editing needed:
 
+- **Input protection** stays visible above either content page. The app starts
+  with physical keyboard/mouse input **locked system-wide**. Press **Escape**
+  to unlock and pause automation; use **Lock input / resume** to bring Muse
+  forward and continue. There is no automatic relock.
 - **Website**: shows the site webview's current URL; change the target URL
   and Apply to save it and navigate the site pane. **Reload page** reloads
   the current page.
@@ -89,6 +93,13 @@ The left pane is the app — no JSON editing needed:
   slider (0.25–4.0×). Typing gets per-keystroke variance, longer pauses on
   spaces and sentence ends, and occasional thinking pauses. Mouse speed only
   scales replay tempo — the trajectory is always your transformed recording.
+  Shortest/longest wait controls default to 0.1–10 seconds. Each native
+  `move_to` (or `mouse`) and `click` waits a fresh random duration in that range,
+  including sequence steps, before resolving its target. These are pauses
+  between actions, not between points within a movement. Equal limits give a
+  fixed wait; both zero disable waiting. Typing, DOM/script actions, and
+  recording controls are unaffected. Escape still pauses automation during
+  a wait; after the wait expires, the action waits for Lock/resume.
 - **Mouse recordings**: **Record movements…** opens a dedicated recording
   screen with Start, Stop, Done, live pause progress, and a saved-movement
   count. Saved movements and their Delete controls appear only on that screen,
@@ -102,7 +113,7 @@ Settings are also in `config.json` under `humanInput` if you prefer
 the file:
 
 ```json
-"humanInput": { "typingWpm": 55, "mouseSpeed": 1.0 }
+"humanInput": { "typingWpm": 55, "mouseSpeed": 1.0, "minWaitSeconds": 0.1, "maxWaitSeconds": 10 }
 ```
 
 ## Config — Documents/muse-local/config.json
@@ -302,9 +313,11 @@ outside the sidebar, including elsewhere on the desktop.
    Old recordings remain compatible. `mouse` picks randomly from the 3
    closest-length recordings.
 
-Only real, non-injected mouse input is recorded. The low-level keyboard hook
-observes Escape for stopping; it does not record typed keys or block the
-Escape event. Recording errors appear on the screen. Failed saves retain the
+Unlock input with Escape before starting a recording. Only real, non-injected
+mouse input is recorded. Escape stops recording and is consumed so that the
+same keypress does not also dismiss website UI. Other Escape presses while
+already unlocked and not recording pass through normally. Recording errors
+appear on the screen. Failed saves retain the
 movement in memory and retry while the app remains open; do not close the app
 while an error or saving indicator is displayed.
 
@@ -313,6 +326,31 @@ file. `rec_stop` saves the current usable movement and waits for pending saves;
 `recordings` lists the resulting files. The UI uses a discard-current option
 for Stop/Done so control-approach movement is excluded. Starting again resets
 the session counters, not the saved movement library.
+
+## Input lock and pause
+
+The topmost click-through status bar and window title show locked/unlocked
+state, current command, and queued count; the sidebar has matching status and
+controls. Real mouse movement never cancels a task. While unlocked, queued
+commands stay queued; native movement and typing hold at the next point or
+character and resume after relocking. A click already pressed is released
+before pausing so no mouse button is left held down.
+
+Command and sequence boundaries are gated too. **JavaScript already executing
+in a website cannot be suspended safely by this lock**: that page action can
+finish, but the next command/sequence step waits. Timers inside that script
+continue. Pausing does not roll back actions already performed.
+
+Before native input, Muse must be the foreground window; otherwise native work
+waits. Relocking focuses the website. Moving/resizing the window or navigating
+while paused can invalidate a resolved pointer target, which reports an error
+instead of clicking stale coordinates.
+
+Escape is always the unlock route. Ctrl+Alt+Del remains available; Win+L
+unlocks/pauses Muse and requests the Windows lock screen. Closing the main
+window exits the app and removes its hooks and status window. If hook startup
+or the indicator fails, input remains available and automation is stopped with
+an explicit error. No watchdog auto-unlock or auto-relock is used.
 
 ## Repo conventions
 

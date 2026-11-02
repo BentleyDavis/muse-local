@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-input-lock-status"
+description = "Enables the input_lock_status command without any pre-configured scope."
+commands.allow = ["input_lock_status"]
+
+[[permission]]
+identifier = "deny-input-lock-status"
+description = "Denies the input_lock_status command without any pre-configured scope."
+commands.deny = ["input_lock_status"]

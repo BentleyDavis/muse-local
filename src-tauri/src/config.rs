@@ -131,6 +131,23 @@ fn validate(cfg: &Value) -> Result<(), String> {
     if !(0.25..=4.0).contains(&speed) {
         return Err("humanInput.mouseSpeed must be 0.25–4.0".to_string());
     }
+    let wait = |key: &str, default: f64| -> Result<f64, String> {
+        let value = match cfg.pointer(&format!("/humanInput/{key}")) {
+            None => default,
+            Some(value) => value
+                .as_f64()
+                .ok_or_else(|| format!("humanInput.{key} must be a number"))?,
+        };
+        if !(0.0..=10.0).contains(&value) {
+            return Err(format!("humanInput.{key} must be 0-10 seconds"));
+        }
+        Ok(value)
+    };
+    let min_wait = wait("minWaitSeconds", 0.1)?;
+    let max_wait = wait("maxWaitSeconds", 10.0)?;
+    if min_wait > max_wait {
+        return Err("shortest wait must not exceed longest wait".to_string());
+    }
     Ok(())
 }
 
