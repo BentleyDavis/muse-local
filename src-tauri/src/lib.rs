@@ -3,6 +3,8 @@ mod config;
 mod input;
 mod input_lock;
 mod secret;
+mod scripts;
+mod logging;
 
 use std::{collections::HashMap, sync::Mutex, time::Duration};
 use tauri::Manager;
@@ -340,6 +342,9 @@ pub fn run() {
             config::save_config,
             config::set_firebase_token,
             secret::delete_firebase_token,
+            scripts::list_scripts,
+            scripts::load_script,
+            logging::append_console_log,
             input::pointer_geometry,
             input::mouse_path,
             input::click_at,
@@ -351,6 +356,8 @@ pub fn run() {
             input_lock::set_input_locked,
             input_lock::wait_for_automation,
             input_lock::input_activity,
+            input_lock::begin_automation,
+            input_lock::end_automation,
             input::list_recordings,
             input::load_recording,
             input::delete_recording,

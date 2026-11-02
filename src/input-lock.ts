@@ -4,6 +4,8 @@ import { button, el } from "./ui";
 interface LockStatus {
   locked: boolean;
   ready: boolean;
+  active: boolean;
+  paused: boolean;
   error: string | null;
 }
 
@@ -30,13 +32,15 @@ export function createInputLockPanel(onError: (message: string) => void): HTMLEl
   const update = (value: LockStatus) => {
     last = value;
     status.textContent = !value.ready ? "Protection unavailable — automation stopped" :
-      value.locked ? "INPUT LOCKED — Muse can run" : "UNLOCKED — Muse paused";
+      value.locked ? "INPUT LOCKED — Muse running" :
+      value.paused ? "UNLOCKED — Muse paused" : "UNLOCKED — Idle / ready";
     panel.style.borderColor = value.locked ? "#d35d5d" : "#3ddc84";
-    control.textContent = value.locked ? "Unlock / pause" : "Lock input / resume";
+    control.textContent = value.paused ? "Resume automation" : "Pause automation";
     control.disabled = busy || !value.ready;
     hint.textContent = value.locked
       ? "Physical input is blocked system-wide. Press Escape to take control."
-      : "Your input works. Tasks stay queued. Lock input to resume; no automatic relock.";
+      : value.paused ? "Your input works. Tasks wait until you resume."
+      : "Input locks only while a task runs and unlocks when it finishes.";
     if (value.error) report(value.error);
   };
   const refresh = async () => {
@@ -59,7 +63,7 @@ export function createInputLockPanel(onError: (message: string) => void): HTMLEl
     error.textContent = "";
     lastError = "";
     try {
-      const value = await invoke<LockStatus>("set_input_locked", { locked: !last.locked });
+      const value = await invoke<LockStatus>("set_input_locked", { locked: last.paused });
       busy = false;
       update(value);
     } catch (e) {

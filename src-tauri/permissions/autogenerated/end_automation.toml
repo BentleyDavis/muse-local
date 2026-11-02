@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-end-automation"
+description = "Enables the end_automation command without any pre-configured scope."
+commands.allow = ["end_automation"]
+
+[[permission]]
+identifier = "deny-end-automation"
+description = "Denies the end_automation command without any pre-configured scope."
+commands.deny = ["end_automation"]

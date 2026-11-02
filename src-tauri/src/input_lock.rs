@@ -7,6 +7,8 @@ use tauri::Manager;
 // Escape is pressed. A single atomic prevents relocking over an emergency stop.
 static CONTROL: AtomicU64 = AtomicU64::new(0);
 static READY: AtomicBool = AtomicBool::new(false);
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+static PAUSED: AtomicBool = AtomicBool::new(false);
 static ERROR: Mutex<Option<String>> = Mutex::new(None);
 static ACTIVITY: Mutex<(String, usize)> = Mutex::new((String::new(), 0));
 
@@ -14,6 +16,8 @@ static ACTIVITY: Mutex<(String, usize)> = Mutex::new((String::new(), 0));
 #[serde(rename_all = "camelCase")]
 pub struct LockStatus {
     locked: bool,
+    active: bool,
+    paused: bool,
     ready: bool,
     error: Option<String>,
 }
@@ -27,6 +31,9 @@ pub fn ready() -> bool {
 }
 
 pub fn unlock() {
+    if ACTIVE.load(Ordering::SeqCst) || locked() {
+        PAUSED.store(true, Ordering::SeqCst);
+    }
     let _ = CONTROL.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |state| {
         Some((state.wrapping_add(2)) & !1)
     });
@@ -44,7 +51,6 @@ pub fn fail(message: String) {
 pub fn initialize() -> Result<(), String> {
     crate::input::initialize_hooks()?;
     READY.store(true, Ordering::SeqCst);
-    let _ = CONTROL.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);
     Ok(())
 }
 
@@ -64,6 +70,8 @@ pub fn wait_until_running() -> Result<(), String> {
 pub fn input_lock_status() -> Result<LockStatus, String> {
     Ok(LockStatus {
         locked: locked(),
+        active: ACTIVE.load(Ordering::SeqCst),
+        paused: PAUSED.load(Ordering::SeqCst),
         ready: READY.load(Ordering::SeqCst),
         error: ERROR.lock().map_err(|e| e.to_string())?.clone(),
     })
@@ -83,9 +91,23 @@ pub fn input_activity(action: String, queued: usize) -> Result<(), String> {
 #[tauri::command]
 pub async fn set_input_locked(app: tauri::AppHandle, locked: bool) -> Result<LockStatus, String> {
     if !locked {
+        PAUSED.store(true, Ordering::SeqCst);
         unlock();
         return input_lock_status();
     }
+    if !ACTIVE.load(Ordering::SeqCst) {
+        PAUSED.store(false, Ordering::SeqCst);
+        return input_lock_status();
+    }
+    PAUSED.store(false, Ordering::SeqCst);
+    if let Err(error) = lock_input(app).await {
+        PAUSED.store(true, Ordering::SeqCst);
+        return Err(error);
+    }
+    input_lock_status()
+}
+
+async fn lock_input(app: tauri::AppHandle) -> Result<(), String> {
     if !READY.load(Ordering::SeqCst) {
         return Err("input protection is unavailable; restart the app".to_string());
     }
@@ -115,7 +137,38 @@ pub async fn set_input_locked(app: tauri::AppHandle, locked: bool) -> Result<Loc
             Ordering::SeqCst,
         )
         .map_err(|_| "lock cancelled by Escape; input remains unlocked".to_string())?;
-    input_lock_status()
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn begin_automation(app: tauri::AppHandle) -> Result<(), String> {
+    ACTIVE.store(true, Ordering::SeqCst);
+    loop {
+        if !ready() {
+            ACTIVE.store(false, Ordering::SeqCst);
+            return Err("input protection unavailable; automation stopped".into());
+        }
+        if PAUSED.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
+        }
+        match lock_input(app.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(_) if PAUSED.load(Ordering::SeqCst) => continue,
+            Err(error) => {
+                ACTIVE.store(false, Ordering::SeqCst);
+                return Err(error);
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub fn end_automation() {
+    ACTIVE.store(false, Ordering::SeqCst);
+    let _ = CONTROL.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |state| {
+        Some(state.wrapping_add(2) & !1)
+    });
 }
 
 pub fn install_indicator(app: &tauri::AppHandle) -> Result<(), String> {
@@ -155,8 +208,10 @@ pub fn install_indicator(app: &tauri::AppHandle) -> Result<(), String> {
                 )
             } else if status.locked {
                 ("MUSE - INPUT LOCKED - Escape unlocks / pauses", "#7c2525")
-            } else {
+            } else if status.paused {
                 ("MUSE - UNLOCKED - automation paused", "#205b39")
+            } else {
+                ("MUSE - UNLOCKED - idle / ready", "#205b39")
             };
             let activity = match ACTIVITY.lock() {
                 Ok(activity) => activity.clone(),

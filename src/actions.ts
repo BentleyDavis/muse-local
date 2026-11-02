@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { waitWithCountdown } from "./wait";
 import {
   pickRecording,
   transformTo,
@@ -48,6 +50,9 @@ export interface ActionContext {
   runPage(script: string, args?: unknown): Promise<unknown>;
   navigate(url: string): Promise<string>;
   humanInput(): Promise<HumanInput>;
+  runAutomation(script: string, args?: unknown): Promise<unknown>;
+  signal?: AbortSignal;
+  onProgress?(text: string): void;
 }
 
 type ActionHandler = (
@@ -219,7 +224,7 @@ registerAction("ping", async (_args, context) => {
   const page = objectArgs(
     await context.runPage("return { url: location.href, title: document.title };")
   );
-  return { version: "0.2.0", url: page.url, title: page.title };
+  return { version: await getVersion(), url: page.url, title: page.title };
 });
 
 registerAction("navigate", async (args, context) =>
@@ -229,6 +234,15 @@ registerAction("navigate", async (args, context) =>
 registerAction("run", async (args, context) =>
   context.runPage(stringArg(args, "script"), args.args)
 );
+
+registerAction("automation", async (args, context) =>
+  context.runAutomation(stringArg(args, "script"), args.args)
+);
+
+registerAction("automation_file", async (args, context) => {
+  const script = await invoke<string>("load_script", { name: stringArg(args, "name") });
+  return context.runAutomation(script, args.args);
+});
 
 registerAction("dom", async (args, context) =>
   context.runPage(DOM_SCRIPT, args)
@@ -285,6 +299,7 @@ async function movePointer(args: ActionArgs, context: ActionContext): Promise<un
     enteredPage: args.from === undefined && !inside(cursor, frame),
   };
   if (from.x === to.x && from.y === to.y) {
+    context.signal?.throwIfAborted();
     await invoke("mouse_path", { points: [{ ...to, dtMs: 0 }], speed, frame });
     return { points: 1, recording: null, mirrored, speed, ...resolved };
   }
@@ -297,6 +312,7 @@ async function movePointer(args: ActionArgs, context: ActionContext): Promise<un
   }
   const points = await invoke<RecPoint[]>("load_recording", { id: rec.id });
   const path = transformTo(points, from, to, mirrored);
+  context.signal?.throwIfAborted();
   await invoke("mouse_path", { points: path, speed, frame });
   return { points: path.length, recording: rec.id, mirrored, speed, ...resolved };
 }
@@ -331,6 +347,7 @@ registerAction("click", async (args, context) => {
   if (button !== "left" && button !== "right" && button !== "middle") {
     throw new Error("button must be left, right, or middle");
   }
+  context.signal?.throwIfAborted();
   await invoke("click_at", { ...target.to, button, frame: target.geometry.frame });
   return { ok: true, to: labeledPoint(target.to, target) };
 });
@@ -338,6 +355,7 @@ registerAction("click", async (args, context) => {
 registerAction("type", async (args, context) => {
   if (typeof args.text !== "string") throw new Error("text must be a string");
   const wpm = (await context.humanInput()).typingWpm;
+  context.signal?.throwIfAborted();
   await invoke("type_text", { text: args.text, wpm });
   return { ok: true, wpm };
 });
@@ -366,9 +384,41 @@ registerAction("sequence", async (args, context, depth) => {
   return { results };
 });
 
-export async function waitForAction(action: string): Promise<void> {
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    };
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      reject(new Error("automation script stopped"));
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+export async function waitForAction(
+  action: string,
+  signal?: AbortSignal,
+  report?: (text: string) => void,
+): Promise<void> {
   if (!["rec_start", "rec_stop", "rec_status", "recordings"].includes(action)) {
-    await invoke("wait_for_automation");
+    if (!signal && !report) {
+      await invoke("wait_for_automation");
+      return;
+    }
+    for (;;) {
+      signal?.throwIfAborted();
+      const state = await invoke<{ ready: boolean; locked: boolean; error: string | null }>("input_lock_status");
+      if (!state.ready) throw new Error(state.error ?? "input protection unavailable");
+      if (state.locked) return;
+      report?.(`Paused — waiting for Resume before ${action}`);
+      await delay(50, signal);
+    }
   }
 }
 
@@ -380,15 +430,18 @@ export async function executeAction(
 ): Promise<unknown> {
   const handler = handlers.get(action);
   if (!handler) throw new Error(`unknown action: ${action}`);
-  await waitForAction(action);
+  context.signal?.throwIfAborted();
+  await waitForAction(action, context.signal, context.onProgress);
   if (action === "move_to" || action === "mouse" || action === "click") {
     const { minWaitSeconds: min, maxWaitSeconds: max } = await context.humanInput();
     if (!Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max > 10 || min > max) {
       throw new Error("Movement/click waits must satisfy 0 <= shortest <= longest <= 10 seconds.");
     }
     const delayMs = (min + Math.random() * (max - min)) * 1000;
-    await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
-    await waitForAction(action);
+    await waitWithCountdown(delayMs, `until ${action}`, text => context.onProgress?.(text), context.signal);
+    await waitForAction(action, context.signal, context.onProgress);
   }
+  context.signal?.throwIfAborted();
+  context.onProgress?.(action === "wait_for" ? "Waiting for page element…" : `Running: ${action}`);
   return handler(objectArgs(args), context, depth);
 }

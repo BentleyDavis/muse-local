@@ -1,5 +1,6 @@
 [package]
 name = "muse-local"
+# Authoritative app version; Tauri packaging and runtime consumers inherit it.
 version = "0.2.0"
 description = "Muse Local — desktop browser automation with human-like native input"
 authors = ["you"]

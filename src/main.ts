@@ -1,13 +1,14 @@
 // The trusted local sidebar owns the command channel and dispatches page
 // actions through Rust; the remote site never owns app credentials or actions.
 import { invoke } from "@tauri-apps/api/core";
-import { executeAction, waitForAction, type ActionContext } from "./actions";
+import { getVersion } from "@tauri-apps/api/app";
+import { executeAction, type ActionContext } from "./actions";
 import { FirebaseChannel, SerialQueue, type QueueEntry } from "./firebase";
 import { createRecordingPage } from "./recording-page";
 import { button, el, section } from "./ui";
 import { createInputLockPanel } from "./input-lock";
-
-const VERSION = "0.2.0";
+import { AutomationRunner } from "./automation";
+import { createLocalScripts } from "./local-scripts";
 
 interface HumanInput {
   typingWpm: number;
@@ -156,8 +157,24 @@ function slider(
 let sayEl: HTMLElement;
 type ConsoleLevel = "info" | "ok" | "warn" | "err";
 let logArea: HTMLElement | null = null;
+let logWrites: Promise<void> = Promise.resolve();
+let logWriteErrorShown = false;
 
 function appendLog(source: string, level: ConsoleLevel, text: string) {
+  logWrites = logWrites.then(async () => {
+    try {
+      await invoke("append_console_log", { source, level, text });
+      logWriteErrorShown = false;
+    } catch (error) {
+      console.error("File logging failed:", error);
+      if (!logWriteErrorShown) {
+        logWriteErrorShown = true;
+        const message = `File logging failed: ${String(error)}`;
+        if (logArea) logArea.append(el("div", message, "color:#ff9d9d;"));
+        else document.body.append(el("p", message, "color:#ff9d9d;"));
+      }
+    }
+  });
   if (!logArea) return;
   const colors: Record<ConsoleLevel, string> = {
     info: "#9aa3b2",
@@ -193,12 +210,26 @@ const commandQueue = new SerialQueue();
 const commandSessionId = crypto.randomUUID();
 let queueSummary: HTMLElement | null = null;
 let queueList: HTMLElement | null = null;
+let latestQueueEntries: QueueEntry[] = [];
+let automationActivity = "";
+let actionProgress: HTMLElement | null = null;
+
+function showActionProgress(text: string): void {
+  automationActivity = text;
+  if (actionProgress) actionProgress.textContent = text;
+  reportInputActivity();
+}
+
+function reportInputActivity(): void {
+  void invoke("input_activity", {
+    action: automationActivity || latestQueueEntries.find((entry) => entry.status === "running")?.action || "",
+    queued: latestQueueEntries.filter((entry) => entry.status === "queued").length,
+  }).catch((error: unknown) => appendLog("input", "err", String(error)));
+}
 
 function renderCommandQueue(entries: QueueEntry[]): void {
-  void invoke("input_activity", {
-    action: entries.find((entry) => entry.status === "running")?.action ?? "",
-    queued: entries.filter((entry) => entry.status === "queued").length,
-  }).catch((error: unknown) => appendLog("input", "err", String(error)));
+  latestQueueEntries = entries;
+  reportInputActivity();
   if (!queueSummary || !queueList) return;
   const labels: Record<QueueEntry["status"], string> = {
     pending: "Awaiting classification",
@@ -252,7 +283,40 @@ const actionContext: ActionContext = {
     invoke("site_run", { script, args }),
   navigate: (url) => invoke<string>("site_navigate", { url }),
   humanInput: async () => (await currentConfig()).humanInput,
+  runAutomation: (script, args) => automationRunner.run(script, args),
+  onProgress: showActionProgress,
 };
+
+const automationRunner = new AutomationRunner(
+  (action, args, signal, onProgress) => executeAction(action, args, { ...actionContext, signal, onProgress }),
+  (text) => appendLog("script", "info", text),
+);
+automationRunner.onStatus((status, active) => {
+  showActionProgress(active ? status : "");
+});
+
+async function runLocalScript(name: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    commandQueue.enqueue(`local:${crypto.randomUUID()}`, async () => {
+      try {
+        const script = await invoke<string>("load_script", { name });
+        resolve(await withInputProtection(() => automationRunner.run(script)));
+      } catch (error) {
+        reject(error);
+      }
+    }, (message) => appendLog("script", "err", message));
+  });
+}
+
+async function withInputProtection<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    await invoke("begin_automation");
+    return await run();
+  } finally {
+    await invoke("end_automation");
+    showActionProgress("");
+  }
+}
 
 async function refreshFirebaseChannel(): Promise<void> {
   const generation = ++firebaseRefreshGeneration;
@@ -270,8 +334,11 @@ async function refreshFirebaseChannel(): Promise<void> {
     config: cfg.firebase,
     sessionId: commandSessionId,
     queue: commandQueue,
-    beforeExecute: (command) => waitForAction(command.action),
-    execute: (cmd) => executeAction(cmd.action, cmd.args, actionContext),
+    execute: (cmd) => {
+      const run = () => executeAction(cmd.action, cmd.args, actionContext);
+      return ["rec_start", "rec_stop", "rec_status", "recordings"].includes(cmd.action)
+        ? run() : withInputProtection(run);
+    },
     onStatus: (level, message) => appendLog("firebase", level, message),
     onHistory: (entries) => {
       if (firebaseChannel === activeChannel) renderCommandQueue(entries);
@@ -330,6 +397,7 @@ async function sendPing(cfg: LocalConfig): Promise<string> {
 
 async function render() {
   const cfg = await currentConfig();
+  const version = await getVersion();
   document.body.innerHTML = "";
   document.body.style.cssText =
     "margin:0;display:flex;flex-direction:column;height:100vh;overflow:hidden;";
@@ -346,7 +414,7 @@ async function render() {
   // header
   const head = el("div", "", "display:flex;align-items:center;gap:8px;margin-bottom:2px;");
   head.append(el("strong", "Muse Local", "font-size:15px;"));
-  head.append(el("span", `v${VERSION}`, "font-size:11px;color:#9aa3b2;"));
+  head.append(el("span", `v${version}`, "font-size:11px;color:#9aa3b2;"));
   const st = el("div", "", "display:flex;align-items:center;font-size:12px;color:#9aa3b2;margin:4px 0 2px;");
   updateReady(cfg);
   sayEl = el("p", "", "font-size:12px;min-height:18px;margin:6px 0 0;");
@@ -552,6 +620,7 @@ async function render() {
   });
   recSec.append(recordBtn);
   box.append(recSec);
+  box.append(createLocalScripts(automationRunner, runLocalScript, (text, error) => say(text, error)));
 
   // ---- test ----
   const testSec = section("Connection test");
@@ -584,8 +653,12 @@ async function render() {
 
   // Scrollable settings above, resizable console pinned to the bottom.
   content.append(box);
+  const inputPanel = createInputLockPanel((message) => appendLog("input", "err", message));
+  actionProgress = el("p", automationActivity, "font-size:12px;margin:6px 0 0;font-variant-numeric:tabular-nums;");
+  actionProgress.setAttribute("role", "status");
+  inputPanel.append(actionProgress);
   document.body.append(
-    createInputLockPanel((message) => appendLog("input", "err", message)),
+    inputPanel,
     content,
     buildConsole()
   );

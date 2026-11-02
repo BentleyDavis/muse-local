@@ -254,6 +254,7 @@ export class FirebaseChannel {
   private startupIds = new Set<string>();
   private finished = new Map<string, string>();
   private warned = new Map<string, string>();
+  private orphanWarnings = new Map<string, string>();
 
   constructor(options: ChannelOptions) {
     this.options = options;
@@ -934,21 +935,41 @@ export class FirebaseChannel {
   private async cleanupOrphanResults(commands: Set<string>): Promise<void> {
     const response = await this.request("results", {}, "read result history", "?shallow=true");
     const ids = childRecords(await this.json(response, "read result history"), "results");
+    for (const id of this.orphanWarnings.keys()) {
+      if (!(id in ids) || commands.has(id)) this.orphanWarnings.delete(id);
+    }
     for (const id of Object.keys(ids)) {
       if (this.stopped) return;
       if (commands.has(id)) continue;
       const path = this.resultPath(id);
       const result = await this.readVersioned(path, `read result ${id}`);
-      if (result.value === null) continue;
-      if (
-        !isObject(result.value) ||
-        result.value.token !== this.options.config.token ||
-        !isTime(result.value.ts)
-      ) {
-        this.log("warn", `result ${id}: invalid token or timestamp; history was not deleted`);
+      if (result.value === null) {
+        this.orphanWarnings.delete(id);
         continue;
       }
-      if (this.now() - result.value.ts > HISTORY_RETENTION_MS) {
+      const record = result.value;
+      const rawTime = isObject(record) ? record.ts : undefined;
+      const timestamp = typeof rawTime === "string" && /^\d+(\.\d+)?$/.test(rawTime)
+        ? Number(rawTime)
+        : rawTime;
+      const reason = !isObject(record)
+        ? "result is not an object"
+        : record.token !== this.options.config.token
+          ? record.token === undefined ? "result has no channel token" : "result channel token does not match"
+          : !isTime(timestamp)
+            ? "result ts must be epoch milliseconds (number or numeric string)"
+            : timestamp > this.now()
+              ? "result ts is in the future"
+              : null;
+      if (reason) {
+        if (this.orphanWarnings.get(id) !== reason) {
+          this.orphanWarnings.set(id, reason);
+          this.log("warn", `result ${id}: ${reason}; retained without changes. This warning repeats only if the validation issue changes or the app reconnects.`);
+        }
+        continue;
+      }
+      this.orphanWarnings.delete(id);
+      if (isTime(timestamp) && this.now() - timestamp > HISTORY_RETENTION_MS) {
         await this.deleteIfMatch(path, result.etag, `delete result ${id}`);
       }
     }
