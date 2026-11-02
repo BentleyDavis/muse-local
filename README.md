@@ -75,7 +75,15 @@ they're identifiers, not secrets.
 The left pane is the app — no JSON editing needed:
 
 - **Website**: shows the site webview's current URL; change the target URL
-  and Apply to save it and navigate the site pane live.
+  and Apply to save it and navigate the site pane live. **Reload page**
+  reloads the site page (re-runs the control script with current settings —
+  use after changing Firebase values, since the page only reads config at
+  load).
+- **Console** (bottom, drag its top edge to resize, 80–400px): streams log
+  lines from the sidebar and the site page's control script — Firebase
+  connection status, commands received/completed, saves, ping results. When
+  a ping gets no response, the console shows whether the site page is even
+  connected to Firebase.
 - **Divider**: the sidebar's right edge is a drag handle — pull it to resize
   (200–800px); the width is saved to `config.json` (`sidebarWidth`) and
   restored on launch.
