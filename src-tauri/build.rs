@@ -11,6 +11,7 @@ fn main() {
             "save_config",
             "set_firebase_token",
             "delete_firebase_token",
+            "pointer_geometry",
             "mouse_path",
             "click_at",
             "type_text",

@@ -12,9 +12,9 @@ untrusted page controlled through a restricted Rust bridge.
   Firebase, and native input; the site pane can navigate between HTTP(S)
   pages. The sidebar stays visible and the split survives window resizes.
 - The sidebar listens to Firebase Realtime Database (named SSE events with
-  polling fallback), dispatches commands, and reports their results. Scripts
-  execute in the current site's JavaScript context through Rust, so they can
-  interact with that page's DOM and APIs.
+  polling fallback), runs commands one at a time, and reports their status
+  and results. Scripts execute in the current site's JavaScript context through
+  Rust, so they can interact with that page's DOM and APIs.
 - The site webview is untrusted. Its Tauri capability allows only a
   one-time response to a pending page action; it cannot read the Firebase
   token or invoke app configuration and native input commands. A visited
@@ -74,6 +74,9 @@ The left pane is the app — no JSON editing needed:
 - **Website**: shows the site webview's current URL; change the target URL
   and Apply to save it and navigate the site pane. **Reload page** reloads
   the current page.
+- **Command queue**: shows queued and running commands, completed and failed
+  commands, and commands not run while the app was offline. Results remain in
+  Firebase for the same history period.
 - **Console** (bottom, drag its top edge to resize, 80–400px): shows local
   sidebar, Firebase, and Muse command status. Website scripts do not own
   this log or the Firebase connection.
@@ -131,10 +134,14 @@ the trusted local sidebar.
       "$token": {
         ".read": true,
         "commands": {
-          ".write": "newData.child('token').val() === $token || !newData.exists()"
+          "$id": {
+            ".write": "newData.child('token').val() === $token || !newData.exists()"
+          }
         },
         "results": {
-          ".write": "newData.child('token').val() === $token || !newData.exists()"
+          "$id": {
+            ".write": "newData.child('token').val() === $token || !newData.exists()"
+          }
         }
       }
     }
@@ -143,11 +150,11 @@ the trusted local sidebar.
 ```
 
 Read is open under the unguessable token path (the app must stream
-commands, Muse must read results). Writes must carry the token in the body;
-the `!newData.exists()` clause lets either side delete its own nodes.
-
-The node is `muse` — the same one the old browser extension used, so
-existing Firebase rules and tokens keep working unchanged.
+commands, Muse must read results). Each command or result write must carry
+the token in its body; the `!newData.exists()` clause permits deletion.
+The node is `muse` and the token scheme is unchanged. The earlier README
+placed the write rule at `commands` and `results` rather than at each `$id`;
+if you used those example rules, update them in the Firebase console.
 
 ## Troubleshooting
 
@@ -167,15 +174,52 @@ Muse sends a command with a REST PUT:
 
 ```
 PUT https://<db>/muse/<token>/commands/<id>.json
-{ "token": "<token>", "action": "ping", "args": { ... } }
+{ "token": "<token>", "action": "ping", "args": { ... }, "createdAt": 1730000000000 }
 ```
 
-The app deletes the command node, executes, then writes:
+Use a unique ID for every command and do not write the app-owned `queue`
+field or edit a command after submitting it. `createdAt` is an optional Unix
+timestamp in milliseconds; it lets the app identify offline commands that are
+already over 24 hours old. When several commands are discovered together,
+timestamped commands are queued oldest first, followed by untimestamped
+commands in database order.
+After the sidebar's first successful synchronization, newly received commands
+are queued and run one at a time. The app adds `queue.status` to the command:
+
+| Status | Meaning |
+|---|---|
+| `queued` | Waiting behind other work |
+| `running` | Execution has started |
+| `completed` / `failed` | Finished successfully / with an error |
+| `not_run_offline` | Not run because it was present before the app connected, or was queued when the previous session stopped |
+| `interrupted` | The previous session stopped while it was running; it may have partly executed and is not replayed |
+
+Commands present at the first successful synchronization are treated as
+offline, including commands sent while the app was starting but not yet
+connected. Once synchronized, a temporary connection interruption does not
+start a new app session. Results still use the existing path and fields:
 
 ```
 PUT https://<db>/muse/<token>/results/<id>.json
-{ "token": "<token>", "ok": true, "result": { ... }, "ts": 123 }
+{ "token": "<token>", "ok": true, "result": { ... }, "ts": 123, "status": "completed", ... }
 ```
+
+For failed, offline, and interrupted commands, `ok` is `false` and
+`result.error` explains the outcome. A failed result write is retried
+without running the command again; the queue waits and the console shows
+the error. Use one app instance per Firebase channel.
+
+The app retains terminal command records and results for about 24 hours,
+then deletes them while it is running and connected, including older results
+left without a command record by previous versions. An offline command with
+an older `createdAt` is recorded and then pruned; without a timestamp it is
+kept for 24 hours after discovery. Active queued/running commands are not
+expired. An undelivered result is retained and retried rather than deleted.
+The retained command includes its original arguments, and the result can
+include page data, so protect access to the Firebase path. Callers should not
+delete results immediately if they want the full history. Changing connection
+settings stops receiving on the old channel, but work already accepted from it
+finishes in the shared queue.
 
 Actions:
 
@@ -189,17 +233,45 @@ Actions:
 | `wait_for` | `{selector, timeoutMs?}` | `{found, selector}` or a timeout error |
 | `sequence` | `{steps:[{action,args?},...]}` | `{results}`; bounded to 50 steps and 5 levels |
 | `screenshot` | — | `{dataUrl, width, height}` (PNG of the app window) |
-| `mouse` | `{from:{x,y}, to:{x,y}, mirror?}` | replays a transformed recording at the configured mouse speed; `{points, recording, mirrored, speed}` |
-| `click` | `{x, y, button?}` | native OS click |
+| `move_to` / `mouse` | `{selector}` or `{to:{x,y}, from?, space?, mirror?}` | transformed recording; resolved `from`/`to` in page and screen coordinates, plus recording/speed |
+| `cursor` | `{space?}` | current cursor in page and screen coordinates, `insidePage` |
+| `click` | `{selector}` or `{x, y, space?, button?}` | native OS click; resolved target coordinates |
 | `type` | `{text}` | native OS typing at the configured WPM with human variance; `{ok, wpm}` |
 | `rec_start` / `rec_stop` | — | record your mouse; `rec_stop` → `{id, points, lengthPx}` |
 | `recordings` | — | list saved recordings |
 
 Page scripts, arguments, results, and execution time are bounded. A page
 shares its JavaScript context with these scripts, so treat returned page
-data as untrusted. Typical flow for clicking precisely: `dom` `rect` →
-`mouse` (from current position to the element center) → `click`. The `dom`
-`click` operation instead triggers a DOM click directly.
+data as untrusted. Typical native flow: `move_to` with `{ "selector": "#send" }`,
+then `click` with the same selector. Selector targets are scrolled into view
+and use the center of the element's visible rectangle. The `dom` `click`
+operation instead triggers a DOM click directly.
+
+### Pointer coordinates and confinement
+
+`space` defaults to **`"page"`**: CSS pixels in the current website viewport,
+as returned by `getBoundingClientRect()`, not document/scroll coordinates.
+The app handles window position, sidebar offset, display scaling, and browser
+zoom. `dom` `rect` also returns a labeled page-space center. Use
+`space: "screen"` only for explicit physical desktop pixels (including
+negative coordinates on secondary monitors). **Existing callers that supplied
+screen coordinates must now specify `"screen"`.** Selector targets use page
+space only. Omitted `from` starts from the current cursor.
+
+All automated native movement and clicks are restricted by Rust to the
+target website pane, even in screen space. Outside endpoints are rejected.
+Recorded overshoot is clipped at the pane edges. If the cursor starts outside,
+the app places it directly at the nearest page edge before following the
+recording, without injecting a path across the sidebar or desktop; the result
+reports `enteredPage: true`. There must be a usable movement recording unless
+the resolved start and end are identical.
+
+Native pointer input requires the app in the foreground and the target
+uncovered on a connected monitor. The app rechecks geometry and target
+visibility before each injected point and before pressing a mouse button;
+if those checks fail, it reports an error instead of continuing at stale
+coordinates. This is not a physical-input lock: your own mouse movement
+is not blocked by this feature. System-wide manual recording remains unchanged.
 
 ## Building the movement library
 

@@ -2,7 +2,7 @@
 // actions through Rust; the remote site never owns app credentials or actions.
 import { invoke } from "@tauri-apps/api/core";
 import { executeAction, type ActionContext } from "./actions";
-import { FirebaseChannel, type Command } from "./firebase";
+import { FirebaseChannel, SerialQueue, type QueueEntry } from "./firebase";
 
 const VERSION = "0.2.0";
 
@@ -216,6 +216,60 @@ async function currentConfig(): Promise<LocalConfig> {
 }
 
 let firebaseChannel: FirebaseChannel | null = null;
+let firebaseRefreshGeneration = 0;
+const commandQueue = new SerialQueue();
+const commandSessionId = crypto.randomUUID();
+let queueSummary: HTMLElement | null = null;
+let queueList: HTMLElement | null = null;
+
+function renderCommandQueue(entries: QueueEntry[]): void {
+  if (!queueSummary || !queueList) return;
+  const labels: Record<QueueEntry["status"], string> = {
+    pending: "Awaiting classification",
+    invalid: "Invalid",
+    queued: "Queued",
+    running: "Running",
+    completed: "Completed",
+    failed: "Failed",
+    not_run_offline: "Not run — app offline",
+    interrupted: "Interrupted",
+  };
+  const running = entries.filter((entry) => entry.status === "running").length;
+  const queued = entries.filter((entry) => entry.status === "queued").length;
+  queueSummary.textContent = entries.length
+    ? `${running} running · ${queued} queued · ${entries.length} total`
+    : "No commands in the current history.";
+  queueList.replaceChildren();
+  const ordered = [...entries].sort((a, b) => {
+    const activeA = a.status === "running" ? 0 : a.status === "queued" ? 1 : 2;
+    const activeB = b.status === "running" ? 0 : b.status === "queued" ? 1 : 2;
+    if (activeA !== activeB) return activeA - activeB;
+    const timeA = a.finishedAt ?? a.receivedAt ?? 0;
+    const timeB = b.finishedAt ?? b.receivedAt ?? 0;
+    return activeA === 1 ? timeA - timeB : timeB - timeA;
+  });
+  for (const entry of ordered) {
+    const item = el("div", "", "padding:6px 0;border-bottom:1px solid #2c313a;word-break:break-word;");
+    const color =
+      entry.status === "completed" ? "#3ddc84" :
+      entry.status === "failed" || entry.status === "invalid" ? "#ff9d9d" :
+      entry.status === "running" ? "#9fd0ff" : "#f5b942";
+    item.append(
+      el("span", labels[entry.status], `font-weight:600;color:${color};`),
+      el("span", ` · ${entry.action}`, "color:#e8e8e8;")
+    );
+    const timestamp = entry.finishedAt ?? entry.receivedAt;
+    const when = timestamp === undefined ? "" : ` · ${new Date(timestamp).toLocaleString()}`;
+    item.append(el("div", `${entry.id}${when}`, "font-size:10px;color:#9aa3b2;"));
+    if (entry.message) {
+      item.append(el("div", entry.message, "color:#d6dae0;margin-top:3px;"));
+    }
+    if (entry.resultPending) {
+      item.append(el("div", "Result not saved yet; retrying.", "color:#f5b942;margin-top:3px;"));
+    }
+    queueList.append(item);
+  }
+}
 
 const actionContext: ActionContext = {
   runPage: (script, args = null) =>
@@ -224,36 +278,28 @@ const actionContext: ActionContext = {
   humanInput: async () => (await currentConfig()).humanInput,
 };
 
-async function dispatchCommand(cmd: Command, channel: FirebaseChannel): Promise<void> {
-  appendLog("muse", "info", `cmd received: ${cmd.action} (${cmd.id})`);
-  try {
-    const result = await executeAction(cmd.action, cmd.args, actionContext);
-    await channel.sendResult(cmd.id, true, result);
-    appendLog("muse", "ok", `cmd done: ${cmd.action} (${cmd.id})`);
-  } catch (error) {
-    const message = String(error);
-    appendLog("muse", "err", `cmd failed: ${cmd.action} (${cmd.id}): ${message}`);
-    try {
-      await channel.sendResult(cmd.id, false, { error: message });
-    } catch (sendError) {
-      appendLog("firebase", "err", `result write failed: ${String(sendError)}`);
-    }
-  }
-}
-
 async function refreshFirebaseChannel(): Promise<void> {
+  const generation = ++firebaseRefreshGeneration;
+  const cfg = await currentConfig();
+  if (generation !== firebaseRefreshGeneration) return;
+  if (firebaseChannel?.matches(cfg.firebase)) return;
   firebaseChannel?.stop();
   firebaseChannel = null;
-  const cfg = await currentConfig();
+  renderCommandQueue([]);
   if (!cfg.firebase.databaseURL.startsWith("https://") || !cfg.firebase.token) {
     appendLog("firebase", "warn", "connection not started: database URL or token missing");
     return;
   }
-  const activeChannel = new FirebaseChannel(
-    cfg.firebase,
-    (status) => appendLog("firebase", status === "connected" ? "ok" : "info", status),
-    (cmd) => void dispatchCommand(cmd, activeChannel)
-  );
+  const activeChannel = new FirebaseChannel({
+    config: cfg.firebase,
+    sessionId: commandSessionId,
+    queue: commandQueue,
+    execute: (cmd) => executeAction(cmd.action, cmd.args, actionContext),
+    onStatus: (level, message) => appendLog("firebase", level, message),
+    onHistory: (entries) => {
+      if (firebaseChannel === activeChannel) renderCommandQueue(entries);
+    },
+  });
   firebaseChannel = activeChannel;
   activeChannel.start();
 }
@@ -268,30 +314,41 @@ function statusDot(ok: boolean): HTMLElement {
 }
 
 async function sendPing(cfg: LocalConfig): Promise<string> {
+  if (!firebaseChannel?.matches(cfg.firebase) || !firebaseChannel.isReady()) {
+    return "Command channel is not ready yet; wait for it to connect.";
+  }
   const base = `${cfg.firebase.databaseURL.replace(/\/+$/, "")}/${cfg.firebase.node}/${cfg.firebase.token}`;
-  const id = `ping-${Date.now()}`;
+  const id = `ping-${crypto.randomUUID()}`;
   const t0 = Date.now();
   const put = await fetch(`${base}/commands/${id}.json`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id, action: "ping", token: cfg.firebase.token, args: {} }),
+    body: JSON.stringify({ id, action: "ping", token: cfg.firebase.token, args: {}, createdAt: t0 }),
   });
   if (!put.ok) return `write failed (HTTP ${put.status}) — check the database URL`;
+  let lastError = "";
   for (let i = 0; i < 24; i++) {
     await new Promise((r) => setTimeout(r, 500));
     try {
       const res = await fetch(`${base}/results/${id}.json`);
-      if (!res.ok) continue;
-      const j = (await res.json()) as { token?: string; result?: { url?: string } } | null;
-      if (j && j.token === cfg.firebase.token) {
-        void fetch(`${base}/results/${id}.json`, { method: "DELETE" });
+      if (!res.ok) {
+        lastError = `result read failed (HTTP ${res.status})`;
+        continue;
+      }
+      const j = (await res.json()) as {
+        token?: string;
+        ok?: boolean;
+        result?: { url?: string; error?: string };
+      } | null;
+      if (j && j.token === cfg.firebase.token && typeof j.ok === "boolean") {
+        if (!j.ok) return `ping failed — ${j.result?.error ?? "command failed"}`;
         return `pong in ${Date.now() - t0} ms — ${j.result?.url ?? ""}`;
       }
     } catch {
-      // keep polling
+      lastError = "could not read the ping result";
     }
   }
-  return "no response — is the site page loaded?";
+  return `ping timed out; it may still be queued${lastError ? ` (${lastError})` : ""}`;
 }
 
 async function render() {
@@ -376,6 +433,14 @@ async function render() {
   applyRow.append(applyBtn);
   siteSec.append(curRow, curUrl, row("Target URL", targetInput), applyRow);
   box.append(siteSec);
+
+  // ---- command queue ----
+  const queueSec = section("Command queue");
+  queueSummary = el("p", "", "font-size:12px;color:#9aa3b2;margin:4px 0;");
+  queueList = el("div", "", "max-height:240px;overflow-y:auto;font-size:12px;");
+  queueSec.append(queueSummary, queueList);
+  box.append(queueSec);
+  renderCommandQueue([]);
 
   // ---- connection ----
   const connSec = section("Connection");

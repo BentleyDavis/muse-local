@@ -63,11 +63,14 @@ export function transformTo(
   const p1 = points[points.length - 1];
   const sx = p1.x - p0.x;
   const sy = p1.y - p0.y;
-  const srcLen = Math.hypot(sx, sy) || 1;
+  const srcLen = Math.hypot(sx, sy);
+  if (!Number.isFinite(srcLen) || srcLen < 1) {
+    throw new Error("recording start and end must be different");
+  }
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const scale = Math.hypot(dx, dy) / srcLen;
-  const rot = Math.atan2(dy, dx) - Math.atan2(sy, sx);
+  const rot = Math.atan2(dy, dx) - Math.atan2(mirror ? -sy : sy, sx);
   const cos = Math.cos(rot);
   const sin = Math.sin(rot);
 

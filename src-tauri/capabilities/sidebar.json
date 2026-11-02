@@ -15,6 +15,7 @@
     "allow-save-config",
     "allow-set-firebase-token",
     "allow-delete-firebase-token",
+    "allow-pointer-geometry",
     "allow-mouse-path",
     "allow-click-at",
     "allow-type-text",

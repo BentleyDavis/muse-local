@@ -5,6 +5,106 @@
 //! No browser-automation library is involved anywhere — this is raw Win32.
 
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ScreenPoint {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PointerFrame {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    scale_factor: f64,
+    url: String,
+}
+
+impl PointerFrame {
+    fn contains(&self, x: i32, y: i32) -> bool {
+        i64::from(x) >= i64::from(self.x)
+            && i64::from(y) >= i64::from(self.y)
+            && i64::from(x) < i64::from(self.x) + i64::from(self.width)
+            && i64::from(y) < i64::from(self.y) + i64::from(self.height)
+    }
+
+    fn clamp(&self, x: i32, y: i32) -> (i32, i32) {
+        (
+            i64::from(x).clamp(
+                i64::from(self.x),
+                i64::from(self.x) + i64::from(self.width) - 1,
+            ) as i32,
+            i64::from(y).clamp(
+                i64::from(self.y),
+                i64::from(self.y) + i64::from(self.height) - 1,
+            ) as i32,
+        )
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PointerGeometry {
+    frame: PointerFrame,
+    cursor: ScreenPoint,
+}
+
+fn site_frame(site: &tauri::Webview) -> Result<PointerFrame, String> {
+    let state = site.app_handle().state::<crate::AppState>();
+    if !*state.site_loaded.lock().map_err(|e| e.to_string())? {
+        return Err("target webpage is not loaded".to_string());
+    }
+    let window = site.window();
+    if window.is_minimized().map_err(|e| e.to_string())?
+        || !window.is_visible().map_err(|e| e.to_string())?
+    {
+        return Err("target webpage must be visible".to_string());
+    }
+    let origin = window.inner_position().map_err(|e| e.to_string())?;
+    let client = window.inner_size().map_err(|e| e.to_string())?;
+    let position = site.position().map_err(|e| e.to_string())?;
+    let size = site.size().map_err(|e| e.to_string())?;
+    let sidebar = crate::lock_webview(&state.sidebar, "sidebar")?;
+    let sidebar_position = sidebar.position().map_err(|e| e.to_string())?;
+    let sidebar_size = sidebar.size().map_err(|e| e.to_string())?;
+    if i64::from(sidebar_position.x) + i64::from(sidebar_size.width) > i64::from(position.x) {
+        return Err("sidebar overlaps the target webpage; wait for layout to finish".to_string());
+    }
+    if position.x < 0 || position.y < 0 {
+        return Err("target webpage has an invalid client position".to_string());
+    }
+    let width = size.width.min(client.width.saturating_sub(position.x as u32));
+    let height = size
+        .height
+        .min(client.height.saturating_sub(position.y as u32));
+    if width == 0 || height == 0 {
+        return Err("target webpage has no visible area".to_string());
+    }
+    let x = origin
+        .x
+        .checked_add(position.x)
+        .ok_or("invalid webpage x position")?;
+    let y = origin
+        .y
+        .checked_add(position.y)
+        .ok_or("invalid webpage y position")?;
+    if i64::from(x) + i64::from(width) > i64::from(i32::MAX)
+        || i64::from(y) + i64::from(height) > i64::from(i32::MAX)
+    {
+        return Err("invalid webpage bounds".to_string());
+    }
+    Ok(PointerFrame {
+        x,
+        y,
+        width,
+        height,
+        scale_factor: window.scale_factor().map_err(|e| e.to_string())?,
+        url: site.url().map_err(|e| e.to_string())?.to_string(),
+    })
+}
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,25 +133,88 @@ pub struct RecPoint {
 
 #[cfg(windows)]
 mod win {
-    use super::{RecPoint, RecordingInfo, TimedPoint};
+    use super::{PointerFrame, RecPoint, RecordingInfo, ScreenPoint, TimedPoint};
     use std::sync::{Mutex, OnceLock};
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
-    use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows_sys::Win32::Graphics::Gdi::{
+        MonitorFromPoint, ScreenToClient, MONITOR_DEFAULTTONULL,
+    };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-    fn screen_size() -> (i32, i32) {
-        unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
+    pub fn cursor_position() -> Result<ScreenPoint, String> {
+        let mut point = POINT { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut point) } == 0 {
+            return Err("GetCursorPos failed".to_string());
+        }
+        Ok(ScreenPoint {
+            x: point.x,
+            y: point.y,
+        })
     }
 
-    fn to_absolute(x: i32, y: i32) -> (i32, i32) {
-        let (w, h) = screen_size();
-        let w = w.max(1) as i64;
-        let h = h.max(1) as i64;
-        (
-            ((x.max(0) as i64 * 65535) / w) as i32,
-            ((y.max(0) as i64 * 65535) / h) as i32,
-        )
+    pub fn validate_target(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
+        let hwnd = hwnd as HWND;
+        unsafe {
+            if GetForegroundWindow() != hwnd || IsIconic(hwnd) != 0 || IsWindowVisible(hwnd) == 0 {
+                return Err(
+                    "app must be visible and in the foreground for native pointer input".to_string(),
+                );
+            }
+            if MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONULL).is_null() {
+                return Err("pointer target is not on a connected monitor".to_string());
+            }
+            let hit = WindowFromPoint(POINT { x, y });
+            if hit.is_null() || GetAncestor(hit, GA_ROOT) != hwnd {
+                return Err(
+                    "target webpage is covered or outside the visible desktop".to_string(),
+                );
+            }
+            let mut client_point = POINT { x, y };
+            let mut client_rect = std::mem::zeroed();
+            if ScreenToClient(hwnd, &mut client_point) == 0
+                || GetClientRect(hwnd, &mut client_rect) == 0
+                || client_point.x < client_rect.left
+                || client_point.x >= client_rect.right
+                || client_point.y < client_rect.top
+                || client_point.y >= client_rect.bottom
+            {
+                return Err("pointer target is outside the app client area".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn to_absolute(x: i32, y: i32) -> Result<(i32, i32), String> {
+        let (left, top, width, height) = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        };
+        if width <= 1
+            || height <= 1
+            || i64::from(x) < i64::from(left)
+            || i64::from(y) < i64::from(top)
+            || i64::from(x) >= i64::from(left) + i64::from(width)
+            || i64::from(y) >= i64::from(top) + i64::from(height)
+        {
+            return Err("pointer target is outside the virtual desktop".to_string());
+        }
+        // Aim at the pixel center so absolute-input quantization cannot
+        // round an edge point into the sidebar or the next window.
+        if width > 65536 || height > 65536 {
+            return Err("virtual desktop exceeds absolute pointer resolution".to_string());
+        }
+        Ok((
+            (((i64::from(x) - i64::from(left)) * 65536 + 32768) / i64::from(width))
+                .min(65535) as i32,
+            (((i64::from(y) - i64::from(top)) * 65536 + 32768) / i64::from(height))
+                .min(65535) as i32,
+        ))
     }
 
     fn send_mouse(mi: MOUSEINPUT) -> Result<(), String> {
@@ -72,13 +235,13 @@ mod win {
         Ok(())
     }
 
-    fn mouse_move_abs(x: i32, y: i32) -> Result<(), String> {
-        let (ax, ay) = to_absolute(x, y);
+    fn mouse_move_abs(x: i32, y: i32, button_flag: u32) -> Result<(), String> {
+        let (ax, ay) = to_absolute(x, y)?;
         send_mouse(MOUSEINPUT {
             dx: ax,
             dy: ay,
             mouseData: 0,
-            dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+            dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | button_flag,
             time: 0,
             dwExtraInfo: 0,
         })
@@ -104,12 +267,20 @@ mod win {
         })
     }
 
-    pub fn mouse_path(points: &[TimedPoint], speed: f64) -> Result<(), String> {
+    pub fn mouse_path(
+        points: &[TimedPoint],
+        speed: f64,
+        frame: &PointerFrame,
+        check: impl Fn(i32, i32) -> Result<(), String>,
+    ) -> Result<(), String> {
         // speed multiplies replay tempo: 1.0 = as recorded, 2.0 = twice as
-        // fast. The trajectory itself is untouched — only the timing scales.
+        // fast. Only boundary clipping below changes the recorded trajectory.
         let speed = speed.clamp(0.25, 4.0);
         for p in points {
-            mouse_move_abs(p.x, p.y)?;
+            // Recorded curves can overshoot even when both endpoints are safe.
+            let (x, y) = frame.clamp(p.x, p.y);
+            check(x, y)?;
+            mouse_move_abs(x, y, 0)?;
             let dt = ((p.dt_ms as f64) / speed).round() as u64;
             if dt > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(dt.min(2000)));
@@ -118,10 +289,25 @@ mod win {
         Ok(())
     }
 
-    pub fn click_at(x: i32, y: i32, button: &str) -> Result<(), String> {
-        mouse_move_abs(x, y)?;
+    pub fn click_at(
+        x: i32,
+        y: i32,
+        button: &str,
+        check: impl Fn(i32, i32) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let down = match button {
+            "left" => MOUSEEVENTF_LEFTDOWN,
+            "right" => MOUSEEVENTF_RIGHTDOWN,
+            "middle" => MOUSEEVENTF_MIDDLEDOWN,
+            _ => return Err(format!("unknown mouse button: {button}")),
+        };
+        check(x, y)?;
+        mouse_move_abs(x, y, 0)?;
         std::thread::sleep(std::time::Duration::from_millis(30));
-        mouse_button(true, button)?;
+        check(x, y)?;
+        // Position and button-down are one input event, not a click at a
+        // potentially different cursor position after the settling delay.
+        mouse_move_abs(x, y, down)?;
         std::thread::sleep(std::time::Duration::from_millis(40));
         mouse_button(false, button)?;
         Ok(())
@@ -387,23 +573,104 @@ mod win {
 // ---------- Tauri commands ----------
 
 #[tauri::command]
-pub async fn mouse_path(points: Vec<TimedPoint>, speed: f64) -> Result<(), String> {
+pub async fn pointer_geometry(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<PointerGeometry, String> {
+    let site = crate::lock_webview(&state.site, "site")?;
     #[cfg(windows)]
-    return crate::run_blocking(move || win::mouse_path(&points, speed)).await;
+    return crate::run_blocking(move || {
+        Ok(PointerGeometry {
+            frame: site_frame(&site)?,
+            cursor: win::cursor_position()?,
+        })
+    })
+    .await;
     #[cfg(not(windows))]
     {
-        let _ = (&points, &speed);
+        let _ = site;
+        Err("pointer geometry is only supported on Windows".to_string())
+    }
+}
+
+#[cfg(windows)]
+fn check_pointer(
+    site: &tauri::Webview,
+    frame: &PointerFrame,
+    hwnd: isize,
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    if site_frame(site)? != *frame {
+        return Err(
+            "target webpage moved, resized, changed scale, or navigated; resolve the target again"
+                .to_string(),
+        );
+    }
+    if !frame.contains(x, y) {
+        return Err("native pointer input must stay inside the target webpage".to_string());
+    }
+    win::validate_target(hwnd, x, y)
+}
+
+#[tauri::command]
+pub async fn mouse_path(
+    state: tauri::State<'_, crate::AppState>,
+    points: Vec<TimedPoint>,
+    speed: f64,
+    frame: PointerFrame,
+) -> Result<(), String> {
+    if !speed.is_finite() {
+        return Err("mouse speed must be finite".to_string());
+    }
+    if points.is_empty() || points.len() > 100_000 {
+        return Err("mouse path must contain 1 to 100000 points".to_string());
+    }
+    let site = crate::lock_webview(&state.site, "site")?;
+    #[cfg(windows)]
+    {
+        let hwnd = site.window().hwnd().map_err(|e| e.to_string())?.0 as isize;
+        return crate::run_blocking(move || {
+            if site_frame(&site)? != frame {
+                return Err("webpage geometry changed; resolve the target again".to_string());
+            }
+            if !frame.contains(points[0].x, points[0].y)
+                || !frame.contains(points[points.len() - 1].x, points[points.len() - 1].y)
+            {
+                return Err("movement endpoints must be inside the target webpage".to_string());
+            }
+            win::mouse_path(&points, speed, &frame, |x, y| {
+                check_pointer(&site, &frame, hwnd, x, y)
+            })
+        })
+        .await;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (&points, &speed, &frame, &site);
         Err("mouse_path is only supported on Windows".to_string())
     }
 }
 
 #[tauri::command]
-pub async fn click_at(x: i32, y: i32, button: String) -> Result<(), String> {
+pub async fn click_at(
+    state: tauri::State<'_, crate::AppState>,
+    x: i32,
+    y: i32,
+    button: String,
+    frame: PointerFrame,
+) -> Result<(), String> {
+    let site = crate::lock_webview(&state.site, "site")?;
     #[cfg(windows)]
-    return crate::run_blocking(move || win::click_at(x, y, &button)).await;
+    {
+        let hwnd = site.window().hwnd().map_err(|e| e.to_string())?.0 as isize;
+        return crate::run_blocking(move || {
+            win::click_at(x, y, &button, |x, y| check_pointer(&site, &frame, hwnd, x, y))
+        })
+        .await;
+    }
     #[cfg(not(windows))]
     {
-        let _ = (&x, &y, &button);
+        let _ = (&x, &y, &button, &frame, &site);
         Err("click_at is only supported on Windows".to_string())
     }
 }

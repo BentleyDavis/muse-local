@@ -337,6 +337,7 @@ pub fn run() {
             config::save_config,
             config::set_firebase_token,
             secret::delete_firebase_token,
+            input::pointer_geometry,
             input::mouse_path,
             input::click_at,
             input::type_text,
