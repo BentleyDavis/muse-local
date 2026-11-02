@@ -36,5 +36,53 @@ pub fn ensure_config() -> Result<PathBuf, String> {
 pub fn get_config() -> Result<Value, String> {
     let path = ensure_config()?;
     let raw = fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {}", CONFIG_FILE, e))?;
-    serde_json::from_str(&raw).map_err(|e| format!("invalid {}: {}", CONFIG_FILE, e))
+    let mut cfg: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("invalid {}: {}", CONFIG_FILE, e))?;
+
+    // The token lives in Windows Credential Manager, not on disk. Merge it
+    // into the response so the injected page script works unchanged.
+    let disk_token = cfg
+        .pointer("/firebase/token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let token = match super::secret::load_token()? {
+        Some(t) => t,
+        None if is_placeholder(&disk_token) => String::new(),
+        None => disk_token,
+    };
+    if let Some(fb) = cfg.get_mut("firebase") {
+        fb["token"] = Value::String(token);
+    }
+    Ok(cfg)
+}
+
+fn is_placeholder(token: &str) -> bool {
+    token.is_empty() || token.contains("REPLACE")
+}
+
+/// Store the Firebase token in Windows Credential Manager and scrub any
+/// real token out of the on-disk config so it never sits in plaintext.
+#[tauri::command]
+pub fn set_firebase_token(token: String) -> Result<(), String> {
+    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err("token must be letters and numbers only".to_string());
+    }
+    super::secret::store_firebase_token(token)?;
+
+    // Scrub the disk copy: leave the placeholder so a stray real token
+    // can never linger in config.json.
+    let path = ensure_config()?;
+    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut cfg: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    if let Some(fb) = cfg.get_mut("firebase") {
+        let cur = fb.get("token").and_then(|v| v.as_str()).unwrap_or("");
+        if !is_placeholder(cur) {
+            fb["token"] = Value::String(String::new());
+            let out =
+                serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+            fs::write(&path, out).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }

@@ -44,6 +44,26 @@ vanilla TS + Vite + NSIS installer).
 Build the installer: `npm run tauri:build` → NSIS `.exe` in
 `src-tauri/target/release/bundle/nsis`.
 
+## Secrets
+
+The Firebase token is **not** kept in `config.json`. On first run the loader
+prompts for it and stores it in **Windows Credential Manager** under
+`muse-local/firebase-token` (DPAPI-backed: encrypted with your Windows
+login). `get_config` merges it into the in-memory config at runtime, and
+`set_firebase_token` scrubs any real token out of the on-disk file, so the
+secret never sits in plaintext and never enters the repo.
+
+Honest scope: this stops other users on the machine and offline disk theft.
+It does not stop malware already running as your user (it could call the
+same APIs) — no unattended-use store can. The token's blast radius is small
+by design: it only unlocks the Firebase command channel, not your Google
+account or anything else. To rotate it, generate a new token, update the
+Firebase rules, and re-enter it in the app (or delete the credential in
+Windows Credential Manager and let the app prompt again).
+
+`databaseURL`, `node`, and `targetUrl` stay in plaintext `config.json` —
+they're identifiers, not secrets.
+
 ## Config — Documents/muse-local/config.json
 
 ```json
@@ -52,7 +72,7 @@ Build the installer: `npm run tauri:build` → NSIS `.exe` in
   "firebase": {
     "databaseURL": "https://YOUR-PROJECT-default-rtdb.firebaseio.com",
     "node": "muse-local",
-    "token": "LETTERS_AND_NUMBERS_ONLY"
+    "token": ""
   },
   "targetUrl": "https://messages.google.com/web"
 }
