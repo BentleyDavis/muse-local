@@ -76,6 +76,9 @@ The left pane is the app — no JSON editing needed:
 
 - **Website**: shows the site webview's current URL; change the target URL
   and Apply to save it and navigate the site pane live.
+- **Divider**: the sidebar's right edge is a drag handle — pull it to resize
+  (200–800px); the width is saved to `config.json` (`sidebarWidth`) and
+  restored on launch.
 - **Connection**: Firebase database URL, node, and token (set / replace /
   delete — Credential Manager, see Secrets).
 - **Human input**: typing speed slider (15–160 WPM) and mouse replay speed

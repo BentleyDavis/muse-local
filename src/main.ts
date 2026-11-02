@@ -15,6 +15,7 @@ interface LocalConfig {
   firebase: { databaseURL: string; node: string; token: string };
   humanInput: HumanInput;
   targetUrl: string;
+  sidebarWidth: number;
 }
 
 interface RecordingInfo {
@@ -29,6 +30,7 @@ const DEFAULTS: LocalConfig = {
   firebase: { databaseURL: "", node: "muse-local", token: "" },
   humanInput: { typingWpm: 55, mouseSpeed: 1.0 },
   targetUrl: "https://messages.google.com/web",
+  sidebarWidth: 400,
 };
 
 function withDefaults(cfg: Partial<LocalConfig>): LocalConfig {
@@ -37,6 +39,7 @@ function withDefaults(cfg: Partial<LocalConfig>): LocalConfig {
     firebase: { ...DEFAULTS.firebase, ...(cfg.firebase ?? {}) },
     humanInput: { ...DEFAULTS.humanInput, ...(cfg.humanInput ?? {}) },
     targetUrl: cfg.targetUrl ?? DEFAULTS.targetUrl,
+    sidebarWidth: cfg.sidebarWidth ?? DEFAULTS.sidebarWidth,
   };
 }
 
@@ -379,6 +382,87 @@ async function render() {
   box.append(testSec);
 
   document.body.append(box);
+  installDragHandle();
+}
+
+// ---------- draggable divider ----------
+//
+// A 10px grip on the sidebar's right edge. Dragging calls set_sidebar_width
+// (Rust clamps and re-splits the window); on release the width is saved to
+// config.json so it survives restarts.
+function installDragHandle() {
+  const old = document.getElementById("muse-divider");
+  if (old) old.remove();
+
+  const grip = el(
+    "div",
+    "",
+    "position:fixed;top:0;right:0;bottom:0;width:10px;cursor:ew-resize;z-index:50;"
+  );
+  grip.id = "muse-divider";
+  const line = el(
+    "div",
+    "",
+    "position:absolute;top:0;right:4px;bottom:0;width:2px;background:#2c313a;transition:background .15s;"
+  );
+  grip.append(line);
+  grip.addEventListener("mouseenter", () => (line.style.background = "#1d4ed8"));
+  grip.addEventListener("mouseleave", () => {
+    if (!drag) line.style.background = "#2c313a";
+  });
+
+  let drag: { startX: number; startW: number } | null = null;
+  let lastPhysW = 0;
+  let rafQueued = false;
+  let latestCssW = 0;
+
+  const applyQueued = () => {
+    rafQueued = false;
+    const phys = Math.max(1, Math.round(latestCssW * window.devicePixelRatio));
+    invoke<number>("set_sidebar_width", { width: phys })
+      .then((w) => {
+        lastPhysW = w;
+      })
+      .catch(() => {
+        // ignore mid-drag hiccups; the next frame retries
+      });
+  };
+
+  grip.addEventListener("mousedown", (e) => {
+    drag = { startX: e.clientX, startW: document.documentElement.clientWidth };
+    lastPhysW = Math.round(drag.startW * window.devicePixelRatio);
+    line.style.background = "#1d4ed8";
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    latestCssW = drag.startW + (e.clientX - drag.startX);
+    if (!rafQueued) {
+      rafQueued = true;
+      requestAnimationFrame(applyQueued);
+    }
+  });
+  window.addEventListener("mouseup", () => {
+    if (!drag) return;
+    drag = null;
+    line.style.background = "#2c313a";
+    document.body.style.userSelect = "";
+    // Persist the dragged width for the next launch.
+    void (async () => {
+      try {
+        const cfg = await currentConfig();
+        cfg.sidebarWidth = lastPhysW || cfg.sidebarWidth;
+        await invoke("save_config", {
+          config: { ...cfg, firebase: { ...cfg.firebase, token: "" } },
+        });
+      } catch (e) {
+        say(String(e), true);
+      }
+    })();
+  });
+
+  document.body.append(grip);
 }
 
 async function boot() {

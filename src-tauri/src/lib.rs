@@ -3,6 +3,7 @@ mod config;
 mod input;
 mod secret;
 
+use std::sync::Mutex;
 use tauri::Manager;
 
 // Built by `npm run build:control` (vite) into src-tauri/injected/control.js
@@ -10,10 +11,56 @@ use tauri::Manager;
 // the Tauri CLI is run directly without the npm wrapper scripts.
 const CONTROL_JS: &str = include_str!("../injected/control.js");
 
-/// Width of the app sidebar in physical pixels. Everything left of it is
-/// the app (control panel); everything right of it is the website under
-/// control.
-const SIDEBAR_W: u32 = 320;
+/// Default sidebar width in physical pixels (the saved value in
+/// config.json wins once the user drags the divider).
+const DEFAULT_SIDEBAR_W: u32 = 400;
+const MIN_SIDEBAR_W: u32 = 200;
+const MAX_SIDEBAR_W: u32 = 800;
+
+struct AppState {
+    sidebar_width: Mutex<u32>,
+}
+
+/// Re-split the window: sidebar `sidebar_w` px on the left, site takes the
+/// rest. Used at startup, on window resize, and while dragging the divider.
+fn apply_layout(app: &tauri::AppHandle, sidebar_w: u32) -> Result<(), String> {
+    let window = app.get_window("main").ok_or("main window not found")?;
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+    let w = sidebar_w
+        .clamp(MIN_SIDEBAR_W, MAX_SIDEBAR_W)
+        .min(size.width.saturating_sub(200));
+    let sidebar = app.get_webview("sidebar").ok_or("sidebar not found")?;
+    let site = app.get_webview("site").ok_or("site not found")?;
+    sidebar
+        .set_size(tauri::PhysicalSize::new(w, size.height))
+        .map_err(|e| e.to_string())?;
+    site.set_position(tauri::PhysicalPosition::new(w, 0))
+        .map_err(|e| e.to_string())?;
+    site.set_size(tauri::PhysicalSize::new(
+        size.width.saturating_sub(w),
+        size.height,
+    ))
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Drag handler for the sidebar divider. Returns the clamped width so the
+/// frontend can snap its handle; the frontend persists it to config.json
+/// on drag end.
+#[tauri::command]
+fn set_sidebar_width(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    width: u32,
+) -> Result<u32, String> {
+    let w = width.clamp(MIN_SIDEBAR_W, MAX_SIDEBAR_W);
+    *state
+        .sidebar_width
+        .lock()
+        .map_err(|e| e.to_string())? = w;
+    apply_layout(&app, w)?;
+    Ok(w)
+}
 
 /// Navigate the site webview to a new URL (used when the target URL changes
 /// in the sidebar). The initialization script re-runs on navigation, so the
@@ -34,8 +81,28 @@ fn site_url(app: tauri::AppHandle) -> Result<String, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Seed Documents/muse-local/config.json from the bundled default on
+    // first run (same pattern as auto-media-player), then read the saved
+    // sidebar width before building so the initial layout matches it.
+    if let Err(e) = config::ensure_config() {
+        eprintln!("config setup failed: {}", e);
+    }
+    let initial_w = config::get_config()
+        .ok()
+        .and_then(|c| {
+            c.pointer("/sidebarWidth")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32)
+        })
+        .unwrap_or(DEFAULT_SIDEBAR_W)
+        .clamp(MIN_SIDEBAR_W, MAX_SIDEBAR_W);
+
     tauri::Builder::default()
+        .manage(AppState {
+            sidebar_width: Mutex::new(initial_w),
+        })
         .invoke_handler(tauri::generate_handler![
+            set_sidebar_width,
             navigate_site,
             site_url,
             config::get_config,
@@ -53,21 +120,7 @@ pub fn run() {
             input::delete_recording,
             capture::screenshot,
         ])
-        .setup(|app| {
-            // Seed Documents/muse-local/config.json from the bundled default
-            // on first run (same pattern as auto-media-player).
-            if let Err(e) = config::ensure_config() {
-                eprintln!("config setup failed: {}", e);
-            }
-            let target_url = config::get_config()
-                .ok()
-                .and_then(|c| {
-                    c.pointer("/targetUrl")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                })
-                .unwrap_or_default();
-
+        .setup(move |app| {
             let window = tauri::window::WindowBuilder::new(app, "main")
                 .title("Muse Local")
                 .inner_size(1440.0, 900.0)
@@ -80,38 +133,47 @@ pub fn run() {
                 "sidebar",
                 tauri::WebviewUrl::App("index.html".into()),
             );
-            let sidebar_wv = window.add_child(
+            window.add_child(
                 sidebar,
                 tauri::LogicalPosition::new(0, 0),
-                tauri::PhysicalSize::new(SIDEBAR_W, size.height),
+                tauri::PhysicalSize::new(initial_w, size.height),
             )?;
 
             // Site: the target website with the control bridge injected.
             // The init script runs before page scripts on every navigation,
             // in every frame — no extension needed.
+            let target_url = config::get_config()
+                .ok()
+                .and_then(|c| {
+                    c.pointer("/targetUrl")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or_default();
             let start = match target_url.parse() {
                 Ok(u) => tauri::WebviewUrl::External(u),
                 Err(_) => tauri::WebviewUrl::External("about:blank".parse().unwrap()),
             };
             let site = tauri::webview::WebviewBuilder::new("site", start)
                 .initialization_script(CONTROL_JS);
-            let site_wv = window.add_child(
+            window.add_child(
                 site,
-                tauri::PhysicalPosition::new(SIDEBAR_W, 0),
-                tauri::PhysicalSize::new(size.width.saturating_sub(SIDEBAR_W), size.height),
+                tauri::PhysicalPosition::new(initial_w, 0),
+                tauri::PhysicalSize::new(size.width.saturating_sub(initial_w), size.height),
             )?;
 
             // Child webviews keep a fixed size by default — re-split the
-            // window on resize so the sidebar stays 320px and the site
-            // takes the rest.
+            // window on resize using the current (possibly dragged) width.
+            let app_h = app.handle().clone();
             window.on_window_event(move |event| {
-                if let tauri::WindowEvent::Resized(s) = event {
-                    let _ = sidebar_wv.set_size(tauri::PhysicalSize::new(SIDEBAR_W, s.height));
-                    let _ = site_wv.set_position(tauri::PhysicalPosition::new(SIDEBAR_W, 0));
-                    let _ = site_wv.set_size(tauri::PhysicalSize::new(
-                        s.width.saturating_sub(SIDEBAR_W),
-                        s.height,
-                    ));
+                if let tauri::WindowEvent::Resized(_) = event {
+                    let w = app_h
+                        .state::<AppState>()
+                        .sidebar_width
+                        .lock()
+                        .map(|g| *g)
+                        .unwrap_or(DEFAULT_SIDEBAR_W);
+                    let _ = apply_layout(&app_h, w);
                 }
             });
 

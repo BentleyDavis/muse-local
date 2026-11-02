@@ -1,1 +1,14 @@
-{"firebase":{"databaseURL":"https://YOUR-PROJECT-default-rtdb.firebaseio.com","node":"muse-local","token":""},"humanInput":{"mouseSpeed":1.0,"typingWpm":55},"targetUrl":"https://messages.google.com/web","version":1}
+{
+  "firebase": {
+    "databaseURL": "https://YOUR-PROJECT-default-rtdb.firebaseio.com",
+    "node": "muse-local",
+    "token": ""
+  },
+  "humanInput": {
+    "mouseSpeed": 1.0,
+    "typingWpm": 55
+  },
+  "targetUrl": "https://messages.google.com/web",
+  "version": 1,
+  "sidebarWidth": 400
+}
