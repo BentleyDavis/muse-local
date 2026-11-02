@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-page-result"
+description = "Enables the page_result command without any pre-configured scope."
+commands.allow = ["page_result"]
+
+[[permission]]
+identifier = "deny-page-result"
+description = "Denies the page_result command without any pre-configured scope."
+commands.deny = ["page_result"]

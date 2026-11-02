@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-firebase-token"
+description = "Enables the delete_firebase_token command without any pre-configured scope."
+commands.allow = ["delete_firebase_token"]
+
+[[permission]]
+identifier = "deny-delete-firebase-token"
+description = "Denies the delete_firebase_token command without any pre-configured scope."
+commands.deny = ["delete_firebase_token"]

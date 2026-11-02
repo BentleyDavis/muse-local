@@ -66,8 +66,7 @@ mod win {
         }
         let result = unsafe {
             let c = &*pcred;
-            let bytes =
-                std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize);
+            let bytes = std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize);
             String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())
         };
         unsafe { CredFree(pcred as *const std::ffi::c_void) };
@@ -88,7 +87,6 @@ mod win {
     }
 }
 
-#[tauri::command]
 pub fn store_firebase_token(token: String) -> Result<(), String> {
     #[cfg(windows)]
     return win::store_token(&token);

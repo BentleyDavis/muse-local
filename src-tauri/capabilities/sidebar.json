@@ -1,0 +1,28 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "sidebar",
+  "description": "Full app permissions for the trusted local control panel",
+  "local": true,
+  "webviews": ["sidebar"],
+  "permissions": [
+    "core:default",
+    "allow-set-sidebar-width",
+    "allow-site-navigate",
+    "allow-site-info",
+    "allow-site-run",
+    "allow-reload-site",
+    "allow-get-config",
+    "allow-save-config",
+    "allow-set-firebase-token",
+    "allow-delete-firebase-token",
+    "allow-mouse-path",
+    "allow-click-at",
+    "allow-type-text",
+    "allow-start-recording",
+    "allow-stop-recording",
+    "allow-list-recordings",
+    "allow-load-recording",
+    "allow-delete-recording",
+    "allow-screenshot"
+  ]
+}

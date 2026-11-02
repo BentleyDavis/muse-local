@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-click-at"
+description = "Enables the click_at command without any pre-configured scope."
+commands.allow = ["click_at"]
+
+[[permission]]
+identifier = "deny-click-at"
+description = "Denies the click_at command without any pre-configured scope."
+commands.deny = ["click_at"]

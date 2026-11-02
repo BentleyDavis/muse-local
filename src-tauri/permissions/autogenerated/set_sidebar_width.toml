@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-sidebar-width"
+description = "Enables the set_sidebar_width command without any pre-configured scope."
+commands.allow = ["set_sidebar_width"]
+
+[[permission]]
+identifier = "deny-set-sidebar-width"
+description = "Denies the set_sidebar_width command without any pre-configured scope."
+commands.deny = ["set_sidebar_width"]

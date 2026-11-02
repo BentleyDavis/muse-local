@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-site-run"
+description = "Enables the site_run command without any pre-configured scope."
+commands.allow = ["site_run"]
+
+[[permission]]
+identifier = "deny-site-run"
+description = "Denies the site_run command without any pre-configured scope."
+commands.deny = ["site_run"]

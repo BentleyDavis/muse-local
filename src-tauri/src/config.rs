@@ -81,8 +81,8 @@ fn is_placeholder(token: &str) -> bool {
 pub fn get_config() -> Result<Value, String> {
     let mut cfg = merged_config()?;
 
-    // The token lives in Windows Credential Manager, not on disk. Merge it
-    // into the response so the injected page script works unchanged.
+    // The token lives in Windows Credential Manager, not on disk. Return it
+    // only to the trusted sidebar; the remote site webview cannot call this.
     let disk_token = cfg
         .pointer("/firebase/token")
         .and_then(|v| v.as_str())
@@ -107,9 +107,15 @@ fn validate(cfg: &Value) -> Result<(), String> {
     if !db.starts_with("https://") {
         return Err("firebase.databaseURL must be an https URL".to_string());
     }
-    let target = cfg.pointer("/targetUrl").and_then(|v| v.as_str()).unwrap_or("");
-    if !target.starts_with("https://") {
-        return Err("targetUrl must be an https URL".to_string());
+    let target = cfg
+        .pointer("/targetUrl")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let target_url: tauri::webview::Url = target
+        .parse()
+        .map_err(|_| "targetUrl must be a valid http or https URL".to_string())?;
+    if !matches!(target_url.scheme(), "http" | "https") {
+        return Err("targetUrl must use http or https".to_string());
     }
     let wpm = cfg
         .pointer("/humanInput/typingWpm")
@@ -135,7 +141,9 @@ pub fn save_config(mut config: Value) -> Result<(), String> {
     validate(&config)?;
     eprintln!(
         "muse-local: save_config databaseURL={:?} node={:?} targetUrl={:?}",
-        config.pointer("/firebase/databaseURL").and_then(|v| v.as_str()),
+        config
+            .pointer("/firebase/databaseURL")
+            .and_then(|v| v.as_str()),
         config.pointer("/firebase/node").and_then(|v| v.as_str()),
         config.pointer("/targetUrl").and_then(|v| v.as_str()),
     );

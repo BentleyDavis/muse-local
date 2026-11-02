@@ -1,8 +1,8 @@
-// Muse Local sidebar — the app's control panel. This pane is "the app";
-// everything to its right is the website under control. No navigation here:
-// settings apply live to the site webview via commands.
+// The trusted local sidebar owns the command channel and dispatches page
+// actions through Rust; the remote site never owns app credentials or actions.
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { executeAction, type ActionContext } from "./actions";
+import { FirebaseChannel, type Command } from "./firebase";
 
 const VERSION = "0.2.0";
 
@@ -215,6 +215,49 @@ async function currentConfig(): Promise<LocalConfig> {
   return withDefaults(await invoke<Partial<LocalConfig>>("get_config"));
 }
 
+let firebaseChannel: FirebaseChannel | null = null;
+
+const actionContext: ActionContext = {
+  runPage: (script, args = null) =>
+    invoke("site_run", { script, args }),
+  navigate: (url) => invoke<string>("site_navigate", { url }),
+  humanInput: async () => (await currentConfig()).humanInput,
+};
+
+async function dispatchCommand(cmd: Command, channel: FirebaseChannel): Promise<void> {
+  appendLog("muse", "info", `cmd received: ${cmd.action} (${cmd.id})`);
+  try {
+    const result = await executeAction(cmd.action, cmd.args, actionContext);
+    await channel.sendResult(cmd.id, true, result);
+    appendLog("muse", "ok", `cmd done: ${cmd.action} (${cmd.id})`);
+  } catch (error) {
+    const message = String(error);
+    appendLog("muse", "err", `cmd failed: ${cmd.action} (${cmd.id}): ${message}`);
+    try {
+      await channel.sendResult(cmd.id, false, { error: message });
+    } catch (sendError) {
+      appendLog("firebase", "err", `result write failed: ${String(sendError)}`);
+    }
+  }
+}
+
+async function refreshFirebaseChannel(): Promise<void> {
+  firebaseChannel?.stop();
+  firebaseChannel = null;
+  const cfg = await currentConfig();
+  if (!cfg.firebase.databaseURL.startsWith("https://") || !cfg.firebase.token) {
+    appendLog("firebase", "warn", "connection not started: database URL or token missing");
+    return;
+  }
+  const activeChannel = new FirebaseChannel(
+    cfg.firebase,
+    (status) => appendLog("firebase", status === "connected" ? "ok" : "info", status),
+    (cmd) => void dispatchCommand(cmd, activeChannel)
+  );
+  firebaseChannel = activeChannel;
+  activeChannel.start();
+}
+
 function statusDot(ok: boolean): HTMLElement {
   const d = el(
     "span",
@@ -248,7 +291,7 @@ async function sendPing(cfg: LocalConfig): Promise<string> {
       // keep polling
     }
   }
-  return "no response — is the site page loaded with the badge visible?";
+  return "no response — is the site page loaded?";
 }
 
 async function render() {
@@ -274,7 +317,8 @@ async function render() {
   const curUrl = el("p", "…", "font-size:12px;color:#9aa3b2;word-break:break-all;margin:4px 0;");
   const refreshCur = async () => {
     try {
-      curUrl.textContent = await invoke<string>("site_url");
+      const info = await invoke<{ url: string; title: string }>("site_info");
+      curUrl.textContent = info.title ? `${info.title} — ${info.url}` : info.url;
     } catch (e) {
       curUrl.textContent = String(e);
     }
@@ -285,7 +329,7 @@ async function render() {
   reloadBtn.title = "Refresh current URL";
   reloadBtn.addEventListener("click", () => void refreshCur());
   const reloadPageBtn = button("Reload page", false, true);
-  reloadPageBtn.title = "Reload the site page (re-runs the control script with current settings)";
+  reloadPageBtn.title = "Reload the current page";
   reloadPageBtn.addEventListener("click", async () => {
     try {
       await invoke("reload_site");
@@ -300,24 +344,19 @@ async function render() {
     reloadBtn,
     reloadPageBtn
   );
-  const diagBtn = button("Pull site logs", false, true);
-  diagBtn.title = "Ask the site page for its buffered log lines (tests whether the page can reach the app at all)";
-  diagBtn.addEventListener("click", async () => {
-    try {
-      await invoke("site_pull_logs");
-      appendLog("sidebar", "info", "asked the site page for its logs — lines appear above if the page's IPC works");
-    } catch (e) {
-      say(String(e), true);
-    }
-  });
-  const diagRow = el("div", "", "display:flex;gap:8px;margin-top:6px;");
-  diagRow.append(diagBtn);
   const targetInput = textInput(cfg.targetUrl, "https://…");
   const applyBtn = button("Apply & open", true);
   applyBtn.addEventListener("click", async () => {
     const url = targetInput.value.trim();
-    if (!/^https:\/\//.test(url)) {
-      say("Target URL must start with https://", true);
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      say("Enter a valid website URL.", true);
+      return;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      say("Target URL must use http or https.", true);
       return;
     }
     try {
@@ -325,8 +364,9 @@ async function render() {
       // connection fields above is never silently discarded.
       const next = await collectForm();
       await invoke("save_config", { config: { ...next, firebase: { ...next.firebase, token: "" } } });
-      await invoke("navigate_site", { url });
-      say("Settings saved. Site webview navigating…");
+      await refreshFirebaseChannel();
+      const finalUrl = await invoke<string>("site_navigate", { url: parsed.toString() });
+      say(`Settings saved. Showing ${finalUrl}`);
       void refreshCur();
     } catch (e) {
       say(String(e), true);
@@ -334,7 +374,7 @@ async function render() {
   });
   const applyRow = el("div", "", "display:flex;gap:8px;margin-top:6px;");
   applyRow.append(applyBtn);
-  siteSec.append(curRow, curUrl, row("Target URL", targetInput), applyRow, diagRow);
+  siteSec.append(curRow, curUrl, row("Target URL", targetInput), applyRow);
   box.append(siteSec);
 
   // ---- connection ----
@@ -369,6 +409,7 @@ async function render() {
       await invoke("set_firebase_token", { token: t });
       tokenInput.value = "";
       await refreshTokenState();
+      await refreshFirebaseChannel();
       say("Token saved to Credential Manager.");
     } catch (e) {
       say(String(e), true);
@@ -378,6 +419,7 @@ async function render() {
     try {
       await invoke("delete_firebase_token");
       await refreshTokenState();
+      await refreshFirebaseChannel();
       say("Token deleted.");
     } catch (e) {
       say(String(e), true);
@@ -417,6 +459,7 @@ async function render() {
       await invoke("save_config", {
         config: { ...next, firebase: { ...next.firebase, token: "" } },
       });
+      await refreshFirebaseChannel();
       say("Settings saved.");
     } catch (e) {
       say(String(e), true);
@@ -603,17 +646,9 @@ function installDragHandle() {
 }
 
 async function boot() {
-  // Log lines arrive here from the site webview's control script.
-  try {
-    await listen<{ source: string; level: ConsoleLevel; text: string }>(
-      "muse-log",
-      (e) => appendLog(e.payload.source, e.payload.level, e.payload.text)
-    );
-  } catch {
-    // console still works for sidebar-side lines without it
-  }
   try {
     await render();
+    await refreshFirebaseChannel();
   } catch (e) {
     document.body.innerHTML = "";
     document.body.append(el("p", `Sidebar failed to load: ${String(e)}`, "color:#ff9d9d;padding:16px;"));

@@ -40,12 +40,20 @@ export class FirebaseChannel {
         this.onStatus("connected");
         this.stopPoll();
       };
+      const refreshCommands = () => void this.pollOnce();
+      this.es.addEventListener("put", refreshCommands);
+      this.es.addEventListener("patch", refreshCommands);
+      this.es.addEventListener("cancel", () =>
+        this.fallbackToPolling("stream cancelled — polling")
+      );
+      this.es.addEventListener("auth_revoked", () =>
+        this.fallbackToPolling("stream auth revoked — polling")
+      );
       this.es.onmessage = (e) => {
         void this.handleSnapshot(e.data);
       };
       this.es.onerror = () => {
-        this.onStatus("stream error — polling");
-        this.startPoll();
+        this.startPoll("stream error — polling");
       };
     } catch {
       this.startPoll();
@@ -54,10 +62,22 @@ export class FirebaseChannel {
     void this.pollOnce();
   }
 
-  private startPoll(): void {
+  stop(): void {
+    this.es?.close();
+    this.es = null;
+    this.stopPoll();
+  }
+
+  private startPoll(status = "polling"): void {
     if (this.pollTimer) return;
-    this.onStatus("polling");
+    this.onStatus(status);
     this.pollTimer = setInterval(() => void this.pollOnce(), 1500);
+  }
+
+  private fallbackToPolling(status: string): void {
+    this.es?.close();
+    this.es = null;
+    this.startPoll(status);
   }
 
   private stopPoll(): void {
@@ -107,10 +127,13 @@ export class FirebaseChannel {
       result: payload,
       ts: Date.now(),
     };
-    await fetch(`${this.base}/results/${encodeURIComponent(id)}.json`, {
+    const response = await fetch(`${this.base}/results/${encodeURIComponent(id)}.json`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (!response.ok) {
+      throw new Error(`result write failed (HTTP ${response.status})`);
+    }
   }
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reload-site"
+description = "Enables the reload_site command without any pre-configured scope."
+commands.allow = ["reload_site"]
+
+[[permission]]
+identifier = "deny-reload-site"
+description = "Denies the reload_site command without any pre-configured scope."
+commands.deny = ["reload_site"]

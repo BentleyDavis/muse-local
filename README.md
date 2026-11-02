@@ -1,26 +1,28 @@
 # Muse Local
 
-A Tauri desktop app that gives Muse real-time control of a browser running on
-your PC — no Chrome extension, no Puppeteer/Playwright, no automation library
-at all. Custom code only, modeled on auto-media-player (Tauri 2 + Rust +
-vanilla TS + Vite + NSIS installer).
+A Tauri desktop app that lets Muse automate websites in a dedicated webview
+on your PC — no Chrome extension, Puppeteer, or Playwright. The trusted local
+sidebar owns the Firebase connection and app commands; the website is an
+untrusted page controlled through a restricted Rust bridge.
 
 ## How it works
 
-- The app opens one window split in two: a **sidebar** on the left (the
-  app's control panel — settings, recordings, connection test) and the
-  **target website** on the right (default: Google Messages web). The
-  sidebar is always visible, so it's always clear what is the app and what
-  is the website. The split survives window resizes (sidebar stays 320px).
-- A control script (`src/control.ts`) is injected into **every page** of
-  the site webview via Tauri's `initialization_script` — the same job a
-  content script did in the extension, without any extension plumbing. It
-  re-runs on every navigation, so the bridge survives page changes.
-- The script listens on a Firebase Realtime Database command channel
-  (EventSource with polling fallback). Muse writes a command, the app
-  executes it in the page, and PUTs the result back.
-- Page actions run as direct DOM calls (strict-CSP safe — no runtime codegen
-  except the best-effort `eval` action).
+- The app opens one window split in two: a **trusted sidebar** on the left
+  and one **target website** on the right. The sidebar owns settings,
+  Firebase, and native input; the site pane can navigate between HTTP(S)
+  pages. The sidebar stays visible and the split survives window resizes.
+- The sidebar listens to Firebase Realtime Database (named SSE events with
+  polling fallback), dispatches commands, and reports their results. Scripts
+  execute in the current site's JavaScript context through Rust, so they can
+  interact with that page's DOM and APIs.
+- The site webview is untrusted. Its Tauri capability allows only a
+  one-time response to a pending page action; it cannot read the Firebase
+  token or invoke app configuration and native input commands. A visited
+  site can still observe or alter its own page and forge page results.
+- Actions are modular and site-agnostic: navigate, run JavaScript, inspect
+  the DOM, wait for selectors, take snapshots, and compose bounded sequences.
+- Anything that must use real OS input goes through Rust: mouse movement,
+  clicks, and typing.
 - Anything that must look human goes through **native OS input**: Rust
   `SendInput` mouse movement/clicks/typing on Windows.
 - Mouse movement uses the **record-and-transform** model: record your real
@@ -34,13 +36,8 @@ vanilla TS + Vite + NSIS installer).
 
 1. Install Rust (stable) and Node 20+.
 2. `npm install`
-3. `npm run build:control` — bundles `src/control.ts` into
-   `src-tauri/injected/control.js` (checked in; `lib.rs` loads it via
-   `include_str!`). Re-run after any change to `src/control.ts`,
-   `src/firebase.ts`, or `src/mouse.ts`. The `tauri:dev` / `tauri:build`
-   scripts do this automatically.
-4. `npm run tauri:dev`
-5. First run: the app seeds `Documents/muse-local/config.json` from the
+3. `npm run tauri:dev`
+4. First run: the app seeds `Documents/muse-local/config.json` from the
    bundled default. Fill in your Firebase values in the **sidebar** (left
    pane), then **pair Messages via QR code inside the site webview**
    (fresh profile — one-time). Use QR pairing, not Google sign-in: Google
@@ -75,15 +72,11 @@ they're identifiers, not secrets.
 The left pane is the app — no JSON editing needed:
 
 - **Website**: shows the site webview's current URL; change the target URL
-  and Apply to save it and navigate the site pane live. **Reload page**
-  reloads the site page (re-runs the control script with current settings —
-  use after changing Firebase values, since the page only reads config at
-  load).
-- **Console** (bottom, drag its top edge to resize, 80–400px): streams log
-  lines from the sidebar and the site page's control script — Firebase
-  connection status, commands received/completed, saves, ping results. When
-  a ping gets no response, the console shows whether the site page is even
-  connected to Firebase.
+  and Apply to save it and navigate the site pane. **Reload page** reloads
+  the current page.
+- **Console** (bottom, drag its top edge to resize, 80–400px): shows local
+  sidebar, Firebase, and Muse command status. Website scripts do not own
+  this log or the Firebase connection.
 - **Divider**: the sidebar's right edge is a drag handle — pull it to resize
   (200–800px); the width is saved to `config.json` (`sidebarWidth`) and
   restored on launch.
@@ -96,7 +89,7 @@ The left pane is the app — no JSON editing needed:
 - **Mouse recordings**: record your real mouse movements (Start/Stop),
   list them, delete the duds.
 - **Connection test**: sends a `ping` command through Firebase and reports
-  the round-trip — the fastest way to verify the whole chain works.
+  the round-trip.
 
 Settings are also in `config.json` under `humanInput` if you prefer
 the file:
@@ -104,9 +97,6 @@ the file:
 ```json
 "humanInput": { "typingWpm": 55, "mouseSpeed": 1.0 }
 ```
-
-The in-page badge on the website is status-only (no settings gear — the
-sidebar is always right there).
 
 ## Config — Documents/muse-local/config.json
 
@@ -126,13 +116,11 @@ The token **must be letters and numbers only** — Firebase forbids
 `$ . # [ ] /` in paths and the token is part of the path
 (`muse/<token>/commands`, `muse/<token>/results`).
 
-**Remote-site IPC:** the injected script can only call Tauri commands on a
-remote page if the capability allows that origin — see
-`src-tauri/capabilities/default.json` (`remote.urls`, currently
-`https://messages.google.com/*`). If you point `targetUrl` at a different
-site, widen that pattern or the badge will sit at "config error" and
-commands won't run. (This was the actual cause of the old "settings
-unavailable" gear failure.)
+**Remote-site IPC:** [site.json](./src-tauri/capabilities/site.json) grants
+HTTP(S) site pages only the `page_result` command, which is accepted only
+for an active request from the site webview. [sidebar.json](./src-tauri/capabilities/sidebar.json)
+keeps settings, Firebase token, navigation, and native input commands in
+the trusted local sidebar.
 
 ## Firebase security rules
 
@@ -163,10 +151,8 @@ existing Firebase rules and tokens keep working unchanged.
 
 ## Troubleshooting
 
-- **Site pane stuck on `about:blank`**: the startup navigation logs the
-  resolved URL to the terminal (`muse-local: target_url from config = …`).
-  As a workaround, click **Apply & open** in the sidebar — it navigates
-  through the same API the startup path uses.
+- **Site pane stuck on `about:blank`**: use **Apply & open** in the sidebar
+  to navigate through the same API used by Muse commands.
 - **Ping says `write failed (HTTP 404)`**: the database URL doesn't point
   at a live Realtime Database instance. Re-copy it from the Firebase
   console (Realtime Database → the URL at the top) into the sidebar's
@@ -196,9 +182,12 @@ Actions:
 | action | args | result |
 |---|---|---|
 | `ping` | — | `{version, url, title}` |
+| `navigate` | `{url}` — HTTP(S) URL | final URL after page load |
+| `run` | `{script, args?}` | JSON-safe value returned by the page script |
 | `dom` | `{op, selector, value?}` — op: `exists\|count\|text\|html\|rect\|click\|fill\|scroll` | op-dependent |
-| `eval` | `{code, args?}` | JSON-safe return value (best-effort; strict-CSP pages reject it) |
 | `snapshot` | — | `{url, title, html}` |
+| `wait_for` | `{selector, timeoutMs?}` | `{found, selector}` or a timeout error |
+| `sequence` | `{steps:[{action,args?},...]}` | `{results}`; bounded to 50 steps and 5 levels |
 | `screenshot` | — | `{dataUrl, width, height}` (PNG of the app window) |
 | `mouse` | `{from:{x,y}, to:{x,y}, mirror?}` | replays a transformed recording at the configured mouse speed; `{points, recording, mirrored, speed}` |
 | `click` | `{x, y, button?}` | native OS click |
@@ -206,9 +195,11 @@ Actions:
 | `rec_start` / `rec_stop` | — | record your mouse; `rec_stop` → `{id, points, lengthPx}` |
 | `recordings` | — | list saved recordings |
 
-Typical flow for clicking something precisely: `dom` `rect` → `mouse`
-(from current position to element center) → `click`. Or skip the human
-act and use `dom` `click` directly when indistinguishability doesn't matter.
+Page scripts, arguments, results, and execution time are bounded. A page
+shares its JavaScript context with these scripts, so treat returned page
+data as untrusted. Typical flow for clicking precisely: `dom` `rect` →
+`mouse` (from current position to the element center) → `click`. The `dom`
+`click` operation instead triggers a DOM click directly.
 
 ## Building the movement library
 
@@ -223,7 +214,7 @@ act and use `dom` `click` directly when indistinguishability doesn't matter.
 ## Repo conventions
 
 - One commit per change (batched via the Git database API), never per-file.
-- `src-tauri/injected/control.js` is a checked-in build artifact — rebuild
-  with `npm run build:control` and commit it alongside the TS change.
+- `src/actions.ts` is the sidebar's modular command registry. Site scripts
+  communicate with the app only through the bounded `page_result` bridge.
 - `config.json` and `recordings/` live in `Documents/muse-local`, never in
   the repo.

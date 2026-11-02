@@ -12,9 +12,9 @@ pub struct Screenshot {
 }
 
 #[tauri::command]
-pub fn screenshot(window: tauri::Window) -> Result<Screenshot, String> {
+pub async fn screenshot(window: tauri::Window) -> Result<Screenshot, String> {
     #[cfg(windows)]
-    return win::screenshot(&window);
+    return crate::run_blocking(move || win::screenshot(&window)).await;
     #[cfg(not(windows))]
     {
         let _ = &window;
@@ -25,8 +25,8 @@ pub fn screenshot(window: tauri::Window) -> Result<Screenshot, String> {
 #[cfg(windows)]
 mod win {
     use super::Screenshot;
-    use image::ImageEncoder;
     use image::codecs::png::PngEncoder;
+    use image::ImageEncoder;
     use windows_sys::Win32::Graphics::Gdi::*;
 
     pub fn screenshot(window: &tauri::Window) -> Result<Screenshot, String> {
@@ -55,17 +55,7 @@ mod win {
                 return Err("CreateCompatibleBitmap failed".to_string());
             }
             let old = SelectObject(mem_dc, bmp);
-            let blt_ok = BitBlt(
-                mem_dc,
-                0,
-                0,
-                w as i32,
-                h as i32,
-                screen_dc,
-                x,
-                y,
-                SRCCOPY,
-            );
+            let blt_ok = BitBlt(mem_dc, 0, 0, w as i32, h as i32, screen_dc, x, y, SRCCOPY);
             SelectObject(mem_dc, old);
             ReleaseDC(std::ptr::null_mut(), screen_dc);
             if blt_ok == 0 {

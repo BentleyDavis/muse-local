@@ -204,7 +204,7 @@ mod win {
                 delay += 400.0 + rng.next_f64() * 800.0;
             }
             std::thread::sleep(std::time::Duration::from_millis(
-                delay.round().max(1.0) as u64,
+                delay.round().max(1.0) as u64
             ));
         }
         Ok(())
@@ -266,8 +266,7 @@ mod win {
         HOOK_THREAD.get_or_init(|| {
             std::thread::spawn(|| unsafe {
                 // WH_MOUSE_LL must live on a thread that pumps messages.
-                let hook =
-                    SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), std::ptr::null_mut(), 0);
+                let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), std::ptr::null_mut(), 0);
                 if hook.is_null() {
                     return;
                 }
@@ -282,7 +281,8 @@ mod win {
 
     fn recordings_dir() -> Result<std::path::PathBuf, String> {
         let dir = crate::config::app_dir().join("recordings");
-        std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create recordings dir: {}", e))?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("failed to create recordings dir: {}", e))?;
         Ok(dir)
     }
 
@@ -378,7 +378,8 @@ mod win {
             return Err("invalid recording id".to_string());
         }
         let path = recordings_dir()?.join(format!("{}.json", id));
-        let raw = std::fs::read_to_string(&path).map_err(|_| format!("recording not found: {}", id))?;
+        let raw =
+            std::fs::read_to_string(&path).map_err(|_| format!("recording not found: {}", id))?;
         serde_json::from_str(&raw).map_err(|e| e.to_string())
     }
 }
@@ -386,9 +387,9 @@ mod win {
 // ---------- Tauri commands ----------
 
 #[tauri::command]
-pub fn mouse_path(points: Vec<TimedPoint>, speed: f64) -> Result<(), String> {
+pub async fn mouse_path(points: Vec<TimedPoint>, speed: f64) -> Result<(), String> {
     #[cfg(windows)]
-    return win::mouse_path(&points, speed);
+    return crate::run_blocking(move || win::mouse_path(&points, speed)).await;
     #[cfg(not(windows))]
     {
         let _ = (&points, &speed);
@@ -397,9 +398,9 @@ pub fn mouse_path(points: Vec<TimedPoint>, speed: f64) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn click_at(x: i32, y: i32, button: String) -> Result<(), String> {
+pub async fn click_at(x: i32, y: i32, button: String) -> Result<(), String> {
     #[cfg(windows)]
-    return win::click_at(x, y, &button);
+    return crate::run_blocking(move || win::click_at(x, y, &button)).await;
     #[cfg(not(windows))]
     {
         let _ = (&x, &y, &button);
@@ -408,9 +409,9 @@ pub fn click_at(x: i32, y: i32, button: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn type_text(text: String, wpm: f64) -> Result<(), String> {
+pub async fn type_text(text: String, wpm: f64) -> Result<(), String> {
     #[cfg(windows)]
-    return win::type_text(&text, wpm);
+    return crate::run_blocking(move || win::type_text(&text, wpm)).await;
     #[cfg(not(windows))]
     {
         let _ = (&text, &wpm);
@@ -427,9 +428,9 @@ pub fn start_recording() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn stop_recording() -> Result<RecordingInfo, String> {
+pub async fn stop_recording() -> Result<RecordingInfo, String> {
     #[cfg(windows)]
-    return win::stop_recording();
+    return crate::run_blocking(win::stop_recording).await;
     #[cfg(not(windows))]
     Err("recording is only supported on Windows".to_string())
 }
