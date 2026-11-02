@@ -2,6 +2,7 @@
 // everything to its right is the website under control. No navigation here:
 // settings apply live to the site webview via commands.
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 const VERSION = "0.2.0";
 
@@ -41,6 +42,74 @@ function withDefaults(cfg: Partial<LocalConfig>): LocalConfig {
     targetUrl: cfg.targetUrl ?? DEFAULTS.targetUrl,
     sidebarWidth: cfg.sidebarWidth ?? DEFAULTS.sidebarWidth,
   };
+}
+
+// ---------- bottom console ----------
+const CONSOLE_H_KEY = "muse-local-console-height";
+
+function buildConsole(): HTMLElement {
+  const wrap = el(
+    "div",
+    "",
+    "flex:none;display:flex;flex-direction:column;border-top:1px solid #2c313a;background:#14161a;"
+  );
+  const startH = Number(localStorage.getItem(CONSOLE_H_KEY)) || 160;
+  wrap.style.height = `${Math.min(400, Math.max(80, startH))}px`;
+
+  // Drag the top edge to resize (80–400px, persisted).
+  let cDrag: { startY: number; startH: number } | null = null;
+  const grip = el("div", "", "flex:none;height:10px;cursor:ns-resize;position:relative;");
+  const gripLine = el(
+    "div",
+    "",
+    "position:absolute;left:0;right:0;top:4px;height:2px;background:#2c313a;"
+  );
+  grip.append(gripLine);
+  grip.addEventListener("mouseenter", () => (gripLine.style.background = "#1d4ed8"));
+  grip.addEventListener("mouseleave", () => {
+    if (!cDrag) gripLine.style.background = "#2c313a";
+  });
+  grip.addEventListener("mousedown", (e) => {
+    cDrag = { startY: e.clientY, startH: wrap.clientHeight };
+    gripLine.style.background = "#1d4ed8";
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!cDrag) return;
+    const h = Math.min(400, Math.max(80, cDrag.startH + (cDrag.startY - e.clientY)));
+    wrap.style.height = `${h}px`;
+  });
+  window.addEventListener("mouseup", () => {
+    if (!cDrag) return;
+    cDrag = null;
+    gripLine.style.background = "#2c313a";
+    document.body.style.userSelect = "";
+    localStorage.setItem(CONSOLE_H_KEY, String(wrap.clientHeight));
+  });
+
+  const head = el("div", "", "flex:none;display:flex;align-items:center;gap:8px;padding:4px 10px;");
+  head.append(
+    el(
+      "strong",
+      "Console",
+      "font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#9fd0ff;"
+    ),
+    el("span", "", "flex:1;")
+  );
+  const clearBtn = button("Clear", false, true);
+  clearBtn.addEventListener("click", () => {
+    if (logArea) logArea.innerHTML = "";
+  });
+  head.append(clearBtn);
+
+  logArea = el(
+    "div",
+    "",
+    "flex:1;overflow-y:auto;padding:4px 10px 10px;font-family:ui-monospace,monospace;font-size:11px;line-height:1.5;min-height:0;"
+  );
+  wrap.append(grip, head, logArea);
+  return wrap;
 }
 
 // ---------- tiny DOM helpers ----------
@@ -117,9 +186,33 @@ function button(text: string, primary = false, small = false): HTMLButtonElement
 // ---------- sidebar ----------
 
 let sayEl: HTMLElement;
+type ConsoleLevel = "info" | "ok" | "warn" | "err";
+let logArea: HTMLElement | null = null;
+
+function appendLog(source: string, level: ConsoleLevel, text: string) {
+  if (!logArea) return;
+  const colors: Record<ConsoleLevel, string> = {
+    info: "#9aa3b2",
+    ok: "#3ddc84",
+    warn: "#f5b942",
+    err: "#ff9d9d",
+  };
+  const line = el("div", "", "padding:1px 0;word-break:break-word;");
+  const time = new Date().toLocaleTimeString("en-US", { hour12: false });
+  line.append(
+    el("span", `[${time}] `, "color:#5b6472;"),
+    el("span", `[${source}] `, `color:${colors[level]};`),
+    el("span", text, "color:#d6dae0;")
+  );
+  logArea.append(line);
+  while (logArea.children.length > 300) logArea.firstChild?.remove();
+  logArea.scrollTop = logArea.scrollHeight;
+}
+
 function say(text: string, isErr = false) {
   sayEl.textContent = text;
   sayEl.style.color = isErr ? "#ff9d9d" : "#9fe8b8";
+  if (text) appendLog("sidebar", isErr ? "err" : "ok", text);
 }
 
 async function currentConfig(): Promise<LocalConfig> {
@@ -165,7 +258,8 @@ async function sendPing(cfg: LocalConfig): Promise<string> {
 async function render() {
   const cfg = await currentConfig();
   document.body.innerHTML = "";
-  document.body.style.cssText = "margin:0;display:block;min-height:100vh;";
+  document.body.style.cssText =
+    "margin:0;display:flex;flex-direction:column;height:100vh;overflow:hidden;";
 
   const box = el("div", "", "padding:14px 14px 24px;");
   const ready = cfg.firebase.databaseURL.startsWith("https://") && !!cfg.firebase.token;
@@ -194,7 +288,22 @@ async function render() {
   const reloadBtn = button("↻", false, true);
   reloadBtn.title = "Refresh current URL";
   reloadBtn.addEventListener("click", () => void refreshCur());
-  curRow.append(el("span", "Now showing:", "font-size:12px;color:#9aa3b2;"), reloadBtn);
+  const reloadPageBtn = button("Reload page", false, true);
+  reloadPageBtn.title = "Reload the site page (re-runs the control script with current settings)";
+  reloadPageBtn.addEventListener("click", async () => {
+    try {
+      await invoke("reload_site");
+      appendLog("sidebar", "info", "site page reloaded");
+      void refreshCur();
+    } catch (e) {
+      say(String(e), true);
+    }
+  });
+  curRow.append(
+    el("span", "Now showing:", "font-size:12px;color:#9aa3b2;"),
+    reloadBtn,
+    reloadPageBtn
+  );
   const targetInput = textInput(cfg.targetUrl, "https://…");
   const applyBtn = button("Apply & open", true);
   applyBtn.addEventListener("click", async () => {
@@ -375,21 +484,33 @@ async function render() {
   const pingOut = el("p", "", "font-size:12px;color:#9aa3b2;margin:6px 0 0;");
   pingBtn.addEventListener("click", async () => {
     pingOut.textContent = "pinging…";
+    appendLog("sidebar", "info", "ping: sending…");
     try {
       const c = await currentConfig();
       if (!c.firebase.databaseURL.startsWith("https://") || !c.firebase.token) {
         pingOut.textContent = "Set the database URL and token first.";
+        appendLog("sidebar", "warn", "ping: missing database URL or token");
         return;
       }
-      pingOut.textContent = await sendPing(c);
+      const result = await sendPing(c);
+      pingOut.textContent = result;
+      appendLog(
+        "sidebar",
+        result.startsWith("pong") ? "ok" : "warn",
+        `ping: ${result}`
+      );
     } catch (e) {
       pingOut.textContent = String(e);
+      appendLog("sidebar", "err", `ping: ${String(e)}`);
     }
   });
   testSec.append(pingBtn, pingOut);
   box.append(testSec);
 
-  document.body.append(box);
+  // Scrollable settings above, resizable console pinned to the bottom.
+  const content = el("div", "", "flex:1;overflow-y:auto;min-height:0;");
+  content.append(box);
+  document.body.append(content, buildConsole());
   installDragHandle();
 }
 
@@ -474,6 +595,15 @@ function installDragHandle() {
 }
 
 async function boot() {
+  // Log lines arrive here from the site webview's control script.
+  try {
+    await listen<{ source: string; level: ConsoleLevel; text: string }>(
+      "muse-log",
+      (e) => appendLog(e.payload.source, e.payload.level, e.payload.text)
+    );
+  } catch {
+    // console still works for sidebar-side lines without it
+  }
   try {
     await render();
   } catch (e) {

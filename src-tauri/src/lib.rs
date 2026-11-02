@@ -92,6 +92,15 @@ fn site_url(state: tauri::State<'_, AppState>) -> Result<String, String> {
     wv.url().map(|u| u.to_string()).map_err(|e| e.to_string())
 }
 
+/// Reload the site page. The initialization script (control bridge) re-runs
+/// on reload, so this picks up changed connection settings without the
+/// app needing a restart.
+#[tauri::command]
+fn reload_site(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let wv = lock_webview(&state.site, "site")?;
+    wv.reload().map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Seed Documents/muse-local/config.json from the bundled default on
@@ -120,6 +129,7 @@ pub fn run() {
             set_sidebar_width,
             navigate_site,
             site_url,
+            reload_site,
             config::get_config,
             config::save_config,
             config::set_firebase_token,

@@ -15,7 +15,10 @@ import {
 const VERSION = "0.2.0";
 
 declare const __TAURI__:
-  | { core: { invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> } }
+  | {
+      core: { invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> };
+      event: { emit(event: string, payload?: unknown): Promise<void> };
+    }
   | undefined;
 
 interface LocalConfig {
@@ -38,6 +41,18 @@ function humanInput(): { typingWpm: number; mouseSpeed: number } {
 function invoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   if (!__TAURI__) return Promise.reject(new Error("tauri bridge unavailable"));
   return __TAURI__.core.invoke<T>(cmd, args);
+}
+
+type LogLevel = "info" | "ok" | "warn" | "err";
+
+// Ship log lines to the sidebar console via a Tauri event. Non-fatal if
+// the bridge isn't there (e.g. very early boot).
+function log(level: LogLevel, text: string): void {
+  try {
+    void __TAURI__?.event.emit("muse-log", { source: "site", level, text });
+  } catch {
+    // ignore
+  }
 }
 
 // ---------- on-screen status badge ----------
@@ -187,34 +202,44 @@ async function handleCommand(cmd: Command): Promise<unknown> {
   const handler = handlers[cmd.action];
   if (!handler) throw new Error(`unknown action: ${cmd.action}`);
   setBadge(`running ${cmd.action}…`);
+  log("info", `cmd received: ${cmd.action} (${cmd.id})`);
   try {
     const result = await handler(cmd.args);
     setBadge("idle");
+    log("ok", `cmd done: ${cmd.action} (${cmd.id})`);
     return result;
   } catch (err) {
     setBadge("error");
+    log("err", `cmd failed: ${cmd.action} (${cmd.id}): ${String(err)}`);
     throw err;
   }
 }
 
 async function boot(): Promise<void> {
   setBadge("starting…");
+  log("info", `control script boot on ${location.href}`);
   let cfg: LocalConfig;
   try {
     cfg = await invoke<LocalConfig>("get_config");
   } catch {
     setBadge("config error");
+    log("err", "get_config failed — is the remote capability allowing this origin?");
     return;
   }
   activeConfig = cfg;
   const fb = cfg?.firebase;
   if (!fb?.databaseURL || !fb.token || /[^A-Za-z0-9]/.test(fb.token)) {
     setBadge("config needed");
+    log("warn", "config incomplete: need databaseURL and token");
     return;
   }
+  log("info", `firebase: node=${fb.node}, db=${fb.databaseURL}`);
   channel = new FirebaseChannel(
     fb,
-    (s) => setBadge(s),
+    (s) => {
+      setBadge(s);
+      log(s === "connected" ? "ok" : "info", `firebase: ${s}`);
+    },
     (cmd) => {
       void handleCommand(cmd)
         .then((result) => channel?.sendResult(cmd.id, true, result))
