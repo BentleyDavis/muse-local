@@ -142,6 +142,11 @@ pub fn run() {
             // Site: the target website with the control bridge injected.
             // The init script runs before page scripts on every navigation,
             // in every frame — no extension needed.
+            //
+            // The webview is created on a local page and then navigated
+            // explicitly: a single navigation through the documented
+            // navigate() API (which re-runs the init scripts), instead of
+            // relying on the builder's initial URL.
             let target_url = config::get_config()
                 .ok()
                 .and_then(|c| {
@@ -150,17 +155,29 @@ pub fn run() {
                         .map(String::from)
                 })
                 .unwrap_or_default();
-            let start = match target_url.parse() {
-                Ok(u) => tauri::WebviewUrl::External(u),
-                Err(_) => tauri::WebviewUrl::External("about:blank".parse().unwrap()),
-            };
-            let site = tauri::webview::WebviewBuilder::new("site", start)
-                .initialization_script(CONTROL_JS);
-            window.add_child(
+            eprintln!("muse-local: target_url from config = {:?}", target_url);
+            let target: Option<tauri::webview::Url> = target_url.parse().ok();
+            let blank: tauri::webview::Url = "about:blank".parse().unwrap();
+            let site = tauri::webview::WebviewBuilder::new(
+                "site",
+                tauri::WebviewUrl::External(blank),
+            )
+            .initialization_script(CONTROL_JS);
+            let site_wv = window.add_child(
                 site,
                 tauri::PhysicalPosition::new(initial_w, 0),
                 tauri::PhysicalSize::new(size.width.saturating_sub(initial_w), size.height),
             )?;
+            match target {
+                Some(u) => {
+                    if let Err(e) = site_wv.navigate(u) {
+                        eprintln!("muse-local: site navigate failed: {}", e);
+                    }
+                }
+                None => {
+                    eprintln!("muse-local: no valid targetUrl — site webview left on about:blank");
+                }
+            };
 
             // Child webviews keep a fixed size by default — re-split the
             // window on resize using the current (possibly dragged) width.
