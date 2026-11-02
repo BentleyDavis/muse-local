@@ -131,22 +131,22 @@ fn validate(cfg: &Value) -> Result<(), String> {
 /// Save settings from the settings screen. The token field is always
 /// scrubbed — tokens are managed separately via set_firebase_token.
 #[tauri::command]
-pub fn save_config(mut cfg: Value) -> Result<(), String> {
-    validate(&cfg)?;
+pub fn save_config(mut config: Value) -> Result<(), String> {
+    validate(&config)?;
     eprintln!(
         "muse-local: save_config databaseURL={:?} node={:?} targetUrl={:?}",
-        cfg.pointer("/firebase/databaseURL").and_then(|v| v.as_str()),
-        cfg.pointer("/firebase/node").and_then(|v| v.as_str()),
-        cfg.pointer("/targetUrl").and_then(|v| v.as_str()),
+        config.pointer("/firebase/databaseURL").and_then(|v| v.as_str()),
+        config.pointer("/firebase/node").and_then(|v| v.as_str()),
+        config.pointer("/targetUrl").and_then(|v| v.as_str()),
     );
-    if let Some(fb) = cfg.get_mut("firebase") {
+    if let Some(fb) = config.get_mut("firebase") {
         if let Some(obj) = fb.as_object_mut() {
             obj.insert("token".to_string(), Value::String(String::new()));
         }
     }
     // Keep a stable key order and don't drop unknown keys the user added.
     let mut full = merged_config()?;
-    if let (Some(base), Some(over)) = (full.as_object_mut(), cfg.as_object()) {
+    if let (Some(base), Some(over)) = (full.as_object_mut(), config.as_object()) {
         for (k, v) in over {
             if k == "firebase" {
                 continue;

@@ -19,18 +19,32 @@ const MAX_SIDEBAR_W: u32 = 800;
 
 struct AppState {
     sidebar_width: Mutex<u32>,
+    /// Webview handles captured at setup. Used directly by commands
+    /// instead of label lookup, so a registry quirk can never lose them.
+    sidebar: Mutex<Option<tauri::Webview>>,
+    site: Mutex<Option<tauri::Webview>>,
+}
+
+fn lock_webview(
+    slot: &Mutex<Option<tauri::Webview>>,
+    what: &str,
+) -> Result<tauri::Webview, String> {
+    slot.lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or_else(|| format!("{} webview not found", what))
 }
 
 /// Re-split the window: sidebar `sidebar_w` px on the left, site takes the
 /// rest. Used at startup, on window resize, and while dragging the divider.
-fn apply_layout(app: &tauri::AppHandle, sidebar_w: u32) -> Result<(), String> {
-    let window = app.get_window("main").ok_or("main window not found")?;
+fn apply_layout(state: tauri::State<'_, AppState>, sidebar_w: u32) -> Result<(), String> {
+    let sidebar = lock_webview(&state.sidebar, "sidebar")?;
+    let site = lock_webview(&state.site, "site")?;
+    let window = site.window();
     let size = window.inner_size().map_err(|e| e.to_string())?;
     let w = sidebar_w
         .clamp(MIN_SIDEBAR_W, MAX_SIDEBAR_W)
         .min(size.width.saturating_sub(200));
-    let sidebar = app.get_webview("sidebar").ok_or("sidebar not found")?;
-    let site = app.get_webview("site").ok_or("site not found")?;
     sidebar
         .set_size(tauri::PhysicalSize::new(w, size.height))
         .map_err(|e| e.to_string())?;
@@ -49,7 +63,6 @@ fn apply_layout(app: &tauri::AppHandle, sidebar_w: u32) -> Result<(), String> {
 /// on drag end.
 #[tauri::command]
 fn set_sidebar_width(
-    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     width: u32,
 ) -> Result<u32, String> {
@@ -58,7 +71,7 @@ fn set_sidebar_width(
         .sidebar_width
         .lock()
         .map_err(|e| e.to_string())? = w;
-    apply_layout(&app, w)?;
+    apply_layout(state, w)?;
     Ok(w)
 }
 
@@ -66,16 +79,16 @@ fn set_sidebar_width(
 /// in the sidebar). The initialization script re-runs on navigation, so the
 /// control bridge keeps working.
 #[tauri::command]
-fn navigate_site(app: tauri::AppHandle, url: String) -> Result<(), String> {
-    let wv = app.get_webview("site").ok_or("site webview not found")?;
+fn navigate_site(state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
+    let wv = lock_webview(&state.site, "site")?;
     let parsed = url.parse().map_err(|e| format!("bad URL: {e}"))?;
     wv.navigate(parsed).map_err(|e| e.to_string())
 }
 
 /// Current URL of the site webview, shown in the sidebar.
 #[tauri::command]
-fn site_url(app: tauri::AppHandle) -> Result<String, String> {
-    let wv = app.get_webview("site").ok_or("site webview not found")?;
+fn site_url(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let wv = lock_webview(&state.site, "site")?;
     wv.url().map(|u| u.to_string()).map_err(|e| e.to_string())
 }
 
@@ -100,6 +113,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             sidebar_width: Mutex::new(initial_w),
+            sidebar: Mutex::new(None),
+            site: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             set_sidebar_width,
@@ -133,11 +148,18 @@ pub fn run() {
                 "sidebar",
                 tauri::WebviewUrl::App("index.html".into()),
             );
-            window.add_child(
+            let sidebar_wv = window.add_child(
                 sidebar,
                 tauri::LogicalPosition::new(0, 0),
                 tauri::PhysicalSize::new(initial_w, size.height),
             )?;
+            // Keep the handles: commands use these directly instead of
+            // label lookup.
+            app.state::<AppState>()
+                .sidebar
+                .lock()
+                .map_err(|e| e.to_string())?
+                .replace(sidebar_wv);;
 
             // Site: the target website with the control bridge injected.
             // The init script runs before page scripts on every navigation,
@@ -168,6 +190,11 @@ pub fn run() {
                 tauri::PhysicalPosition::new(initial_w, 0),
                 tauri::PhysicalSize::new(size.width.saturating_sub(initial_w), size.height),
             )?;
+            app.state::<AppState>()
+                .site
+                .lock()
+                .map_err(|e| e.to_string())?
+                .replace(site_wv.clone());
             match target {
                 Some(u) => {
                     if let Err(e) = site_wv.navigate(u) {
@@ -184,13 +211,13 @@ pub fn run() {
             let app_h = app.handle().clone();
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::Resized(_) = event {
-                    let w = app_h
-                        .state::<AppState>()
+                    let state = app_h.state::<AppState>();
+                    let w = state
                         .sidebar_width
                         .lock()
                         .map(|g| *g)
                         .unwrap_or(DEFAULT_SIDEBAR_W);
-                    let _ = apply_layout(&app_h, w);
+                    let _ = apply_layout(state, w);
                 }
             });
 
