@@ -1,0 +1,33 @@
+[package]
+name = "muse-local"
+version = "0.1.0"
+description = "Muse Local — desktop browser automation with human-like native input"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+# The `_lib` suffix avoids a bin/lib name conflict on Windows,
+# see https://github.com/rust-lang/cargo/issues/8519
+name = "muse_local_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5.0"
+image = "1"
+base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]
