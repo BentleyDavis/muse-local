@@ -204,11 +204,12 @@ async function render() {
       return;
     }
     try {
-      const next = await currentConfig();
-      next.targetUrl = url;
+      // Saves the whole form (not just the URL) so typing in the
+      // connection fields above is never silently discarded.
+      const next = await collectForm();
       await invoke("save_config", { config: { ...next, firebase: { ...next.firebase, token: "" } } });
       await invoke("navigate_site", { url });
-      say("Site webview navigating…");
+      say("Settings saved. Site webview navigating…");
       void refreshCur();
     } catch (e) {
       say(String(e), true);
@@ -281,14 +282,21 @@ async function render() {
       "font-size:11px;color:#9aa3b2;margin:4px 0 0;"
     )
   );
+  // Every save path collects ALL visible inputs, so no button can
+  // silently discard what was typed in another section.
+  const collectForm = async (): Promise<LocalConfig> => {
+    const base = await currentConfig();
+    base.firebase.databaseURL = dbUrl.value.trim();
+    base.firebase.node = node.value.trim() || "muse";
+    base.targetUrl = targetInput.value.trim();
+    base.humanInput.typingWpm = Number(wpmSlider.value);
+    base.humanInput.mouseSpeed = Number(speedSlider.value);
+    return base;
+  };
   const saveBtn = button("Save settings", true);
   saveBtn.addEventListener("click", async () => {
     try {
-      const next = await currentConfig();
-      next.firebase.databaseURL = dbUrl.value.trim();
-      next.firebase.node = node.value.trim() || "muse";
-      next.humanInput.typingWpm = Number(wpmSlider.value);
-      next.humanInput.mouseSpeed = Number(speedSlider.value);
+      const next = await collectForm();
       await invoke("save_config", {
         config: { ...next, firebase: { ...next.firebase, token: "" } },
       });

@@ -133,6 +133,12 @@ fn validate(cfg: &Value) -> Result<(), String> {
 #[tauri::command]
 pub fn save_config(mut cfg: Value) -> Result<(), String> {
     validate(&cfg)?;
+    eprintln!(
+        "muse-local: save_config databaseURL={:?} node={:?} targetUrl={:?}",
+        cfg.pointer("/firebase/databaseURL").and_then(|v| v.as_str()),
+        cfg.pointer("/firebase/node").and_then(|v| v.as_str()),
+        cfg.pointer("/targetUrl").and_then(|v| v.as_str()),
+    );
     if let Some(fb) = cfg.get_mut("firebase") {
         if let Some(obj) = fb.as_object_mut() {
             obj.insert("token".to_string(), Value::String(String::new()));
