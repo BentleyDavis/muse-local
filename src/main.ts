@@ -88,12 +88,23 @@ function buildConsole(): HTMLElement {
     localStorage.setItem(CONSOLE_H_KEY, String(wrap.clientHeight));
   });
 
+  const head = el("div", "", "flex:none;display:flex;align-items:center;gap:8px;padding:4px 10px;");
+  head.append(
+    el("span", "Console", "font-size:11px;color:#5b6472;"),
+    el("span", "", "flex:1;")
+  );
+  const clearBtn = button("Clear", false, true);
+  clearBtn.addEventListener("click", () => {
+    if (logArea) logArea.innerHTML = "";
+  });
+  head.append(clearBtn);
+
   logArea = el(
     "div",
     "",
     "flex:1;overflow-y:auto;padding:6px 10px 10px;font-family:ui-monospace,monospace;font-size:11px;line-height:1.5;min-height:0;"
   );
-  wrap.append(grip, logArea);
+  wrap.append(grip, head, logArea);
   return wrap;
 }
 
