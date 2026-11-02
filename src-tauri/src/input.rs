@@ -335,6 +335,14 @@ mod win {
         Ok(info)
     }
 
+    pub fn delete_recording(id: &str) -> Result<(), String> {
+        if id.contains('/') || id.contains('\\') || id.contains("..") {
+            return Err("bad recording id".to_string());
+        }
+        let path = recordings_dir()?.join(format!("{}.json", id));
+        std::fs::remove_file(&path).map_err(|e| e.to_string())
+    }
+
     pub fn list_recordings() -> Result<Vec<RecordingInfo>, String> {
         let dir = recordings_dir()?;
         let mut out = Vec::new();
@@ -438,6 +446,17 @@ pub fn list_recordings() -> Result<Vec<RecordingInfo>, String> {
 pub fn load_recording(id: String) -> Result<Vec<RecPoint>, String> {
     #[cfg(windows)]
     return win::load_recording(&id);
+    #[cfg(not(windows))]
+    {
+        let _ = &id;
+        Err("recording is only supported on Windows".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn delete_recording(id: String) -> Result<(), String> {
+    #[cfg(windows)]
+    return win::delete_recording(&id);
     #[cfg(not(windows))]
     {
         let _ = &id;

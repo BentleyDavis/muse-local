@@ -12,7 +12,7 @@ import {
   type XY,
 } from "./mouse";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 declare const __TAURI__:
   | { core: { invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> } }
@@ -61,14 +61,9 @@ function setBadge(text: string): void {
         setBadge(`ok ${String((r as { url?: string }).url ?? "")}`)
       );
     });
-    const gear = document.createElement("span");
-    gear.textContent = "⚙";
-    gear.style.cursor = "pointer";
-    gear.title = "Muse Local settings";
-    gear.addEventListener("click", () => {
-      void invoke("open_settings").catch(() => setBadge("settings unavailable"));
-    });
-    badge.append(badgeText, gear);
+    // No settings gear here on purpose: the app's sidebar (left pane) is
+    // always visible and holds all settings. This badge is status only.
+    badge.append(badgeText);
     document.documentElement.appendChild(badge);
   }
   badgeText!.textContent = `Muse v${VERSION} · ${text}`;

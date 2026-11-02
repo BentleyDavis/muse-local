@@ -124,7 +124,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     return out;
   }
-  const VERSION = "0.1.0";
+  const VERSION = "0.2.0";
   let activeConfig = null;
   function humanInput() {
     const h = (activeConfig == null ? void 0 : activeConfig.humanInput) ?? {};
@@ -152,14 +152,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           (r) => setBadge(`ok ${String(r.url ?? "")}`)
         );
       });
-      const gear = document.createElement("span");
-      gear.textContent = "⚙";
-      gear.style.cursor = "pointer";
-      gear.title = "Muse Local settings";
-      gear.addEventListener("click", () => {
-        void invoke("open_settings").catch(() => setBadge("settings unavailable"));
-      });
-      badge.append(badgeText, gear);
+      badge.append(badgeText);
       document.documentElement.appendChild(badge);
     }
     badgeText.textContent = `Muse v${VERSION} · ${text}`;

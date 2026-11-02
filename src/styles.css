@@ -1,40 +1,32 @@
 :root {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   color: #e8e8e8;
-  background: #14161a;
+  background: #1e2126;
+  color-scheme: dark;
 }
 
 body {
   margin: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   min-height: 100vh;
+  font-size: 14px;
 }
 
-.loader {
-  text-align: center;
-  max-width: 560px;
-  padding: 2rem;
+h1,
+h2,
+p {
+  margin: 0;
 }
 
-.loader h1 {
-  font-size: 1.6rem;
-  margin: 0 0 0.5rem;
+/* the sidebar is 320px wide — keep controls compact */
+input[type="range"] {
+  accent-color: #1d4ed8;
 }
 
-#status {
-  font-size: 1.05rem;
-  color: #9fd0ff;
+::-webkit-scrollbar {
+  width: 10px;
 }
-
-#detail {
-  text-align: left;
-  background: #1d2026;
-  border: 1px solid #2c313a;
-  border-radius: 8px;
-  padding: 1rem;
-  white-space: pre-wrap;
-  font-size: 0.85rem;
-  display: none;
+::-webkit-scrollbar-thumb {
+  background: #2c313a;
+  border-radius: 5px;
 }

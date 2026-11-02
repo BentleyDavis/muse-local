@@ -1,4 +1,9 @@
+// Muse Local sidebar — the app's control panel. This pane is "the app";
+// everything to its right is the website under control. No navigation here:
+// settings apply live to the site webview via commands.
 import { invoke } from "@tauri-apps/api/core";
+
+const VERSION = "0.2.0";
 
 interface HumanInput {
   typingWpm: number;
@@ -10,6 +15,13 @@ interface LocalConfig {
   firebase: { databaseURL: string; node: string; token: string };
   humanInput: HumanInput;
   targetUrl: string;
+}
+
+interface RecordingInfo {
+  id: string;
+  points: number;
+  lengthPx: number;
+  created: string;
 }
 
 const DEFAULTS: LocalConfig = {
@@ -41,9 +53,15 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return n;
 }
 
+function section(title: string): HTMLElement {
+  const s = el("div", "", "margin:14px 0 0;");
+  s.append(el("h2", title, "font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#9fd0ff;margin:0 0 6px;"));
+  return s;
+}
+
 function row(labelText: string, input: HTMLElement): HTMLElement {
-  const r = el("div", "", "margin:10px 0;");
-  const lab = el("label", labelText, "display:block;font-size:13px;color:#9aa3b2;margin-bottom:4px;");
+  const r = el("div", "", "margin:8px 0;");
+  const lab = el("label", labelText, "display:block;font-size:12px;color:#9aa3b2;margin-bottom:3px;");
   r.append(lab, input);
   return r;
 }
@@ -54,225 +72,322 @@ function textInput(value: string, placeholder = ""): HTMLInputElement {
   i.value = value;
   i.placeholder = placeholder;
   i.style.cssText =
-    "width:100%;box-sizing:border-box;padding:8px;font-size:14px;" +
+    "width:100%;box-sizing:border-box;padding:7px 8px;font-size:13px;" +
     "background:#14161a;color:#e8e8e8;border:1px solid #2c313a;border-radius:6px;";
   return i;
 }
 
-function slider(min: number, max: number, step: number, value: number): [HTMLInputElement, HTMLElement] {
-  const wrap = el("div", "", "display:flex;align-items:center;gap:12px;");
+function slider(
+  min: number,
+  max: number,
+  step: number,
+  value: number,
+  fmt: (v: number) => string
+): [HTMLInputElement, HTMLElement] {
+  const wrap = el("div", "", "display:flex;align-items:center;gap:10px;");
   const s = el("input") as HTMLInputElement;
   s.type = "range";
   s.min = String(min);
   s.max = String(max);
   s.step = String(step);
   s.value = String(value);
-  s.style.cssText = "flex:1;";
-  const val = el("span", String(value), "min-width:52px;text-align:right;font-variant-numeric:tabular-nums;");
-  s.addEventListener("input", () => (val.textContent = s.value));
+  s.style.cssText = "flex:1;min-width:0;";
+  const val = el(
+    "span",
+    fmt(value),
+    "min-width:56px;text-align:right;font-size:12px;font-variant-numeric:tabular-nums;color:#e8e8e8;"
+  );
+  s.addEventListener("input", () => (val.textContent = fmt(Number(s.value))));
   wrap.append(s, val);
   return [s, wrap];
 }
 
-function button(text: string, primary = false): HTMLButtonElement {
+function button(text: string, primary = false, small = false): HTMLButtonElement {
   const b = el("button", text) as HTMLButtonElement;
   b.style.cssText =
-    "padding:8px 16px;font-size:14px;cursor:pointer;border-radius:6px;border:none;" +
+    (small ? "padding:5px 10px;font-size:12px;" : "padding:7px 14px;font-size:13px;") +
+    "cursor:pointer;border-radius:6px;border:none;" +
     (primary ? "background:#1d4ed8;color:#fff;" : "background:#2c313a;color:#e8e8e8;");
   return b;
 }
 
-// ---------- views ----------
+// ---------- sidebar ----------
 
-let countdown: ReturnType<typeof setInterval> | null = null;
-
-function stopCountdown() {
-  if (countdown) {
-    clearInterval(countdown);
-    countdown = null;
-  }
+let sayEl: HTMLElement;
+function say(text: string, isErr = false) {
+  sayEl.textContent = text;
+  sayEl.style.color = isErr ? "#ff9d9d" : "#9fe8b8";
 }
 
-function statusView(cfg: LocalConfig) {
-  stopCountdown();
-  document.body.innerHTML = "";
-  const box = el("div", "", "text-align:center;max-width:560px;padding:2rem;");
-  box.append(el("h1", "Muse Local", "font-size:1.6rem;margin:0 0 0.5rem;"));
-  const status = el("p", "", "font-size:1.05rem;color:#9fd0ff;");
-  box.append(status);
-  const btns = el("div", "", "display:flex;gap:10px;justify-content:center;margin-top:16px;");
-  const openBtn = button("Open now", true);
-  const settingsBtn = button("Settings");
-  btns.append(openBtn, settingsBtn);
-  box.append(btns);
-  document.body.append(box);
-  document.body.style.cssText =
-    "margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;";
+async function currentConfig(): Promise<LocalConfig> {
+  return withDefaults(await invoke<Partial<LocalConfig>>("get_config"));
+}
 
-  const go = () => {
-    stopCountdown();
-    window.location.href = cfg.targetUrl;
-  };
-  openBtn.addEventListener("click", go);
-  settingsBtn.addEventListener("click", () => settingsView(cfg, null));
+function statusDot(ok: boolean): HTMLElement {
+  const d = el(
+    "span",
+    "",
+    `display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:${ok ? "#3ddc84" : "#f5b942"};`
+  );
+  return d;
+}
 
-  let n = 6;
-  status.textContent = `Opening ${cfg.targetUrl} in ${n}s…`;
-  countdown = setInterval(() => {
-    n -= 1;
-    if (n <= 0) {
-      go();
-      return;
+async function sendPing(cfg: LocalConfig): Promise<string> {
+  const base = `${cfg.firebase.databaseURL.replace(/\/+$/, "")}/${cfg.firebase.node}/${cfg.firebase.token}`;
+  const id = `ping-${Date.now()}`;
+  const t0 = Date.now();
+  const put = await fetch(`${base}/commands/${id}.json`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, action: "ping", token: cfg.firebase.token, args: {} }),
+  });
+  if (!put.ok) return `write failed (HTTP ${put.status}) — check the database URL`;
+  for (let i = 0; i < 24; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const res = await fetch(`${base}/results/${id}.json`);
+      if (!res.ok) continue;
+      const j = (await res.json()) as { token?: string; result?: { url?: string } } | null;
+      if (j && j.token === cfg.firebase.token) {
+        void fetch(`${base}/results/${id}.json`, { method: "DELETE" });
+        return `pong in ${Date.now() - t0} ms — ${j.result?.url ?? ""}`;
+      }
+    } catch {
+      // keep polling
     }
-    status.textContent = `Opening ${cfg.targetUrl} in ${n}s…`;
-  }, 1000);
+  }
+  return "no response — is the site page loaded with the badge visible?";
 }
 
-function settingsView(cfg: LocalConfig, notice: string | null) {
-  stopCountdown();
+async function render() {
+  const cfg = await currentConfig();
   document.body.innerHTML = "";
   document.body.style.cssText = "margin:0;display:block;min-height:100vh;";
 
-  const box = el(
-    "div",
-    "",
-    "max-width:620px;margin:0 auto;padding:2rem 1.5rem;"
-  );
-  box.append(el("h1", "Muse Local — Settings", "font-size:1.4rem;margin:0 0 4px;"));
-  if (notice) {
-    box.append(el("p", notice, "color:#ffd88a;font-size:14px;"));
-  }
+  const box = el("div", "", "padding:14px 14px 24px;");
+  const ready = cfg.firebase.databaseURL.startsWith("https://") && !!cfg.firebase.token;
 
-  box.append(el("h2", "Connection", "font-size:1rem;margin:18px 0 4px;color:#9fd0ff;"));
+  // header
+  const head = el("div", "", "display:flex;align-items:center;gap:8px;margin-bottom:2px;");
+  head.append(el("strong", "Muse Local", "font-size:15px;"));
+  head.append(el("span", `v${VERSION}`, "font-size:11px;color:#9aa3b2;"));
+  const st = el("div", "", "display:flex;align-items:center;font-size:12px;color:#9aa3b2;margin:4px 0 2px;");
+  st.append(statusDot(ready), el("span", ready ? "ready" : "setup needed"));
+  sayEl = el("p", "", "font-size:12px;min-height:18px;margin:6px 0 0;");
+  box.append(head, st, sayEl);
+
+  // ---- site ----
+  const siteSec = section("Website (right pane)");
+  const curUrl = el("p", "…", "font-size:12px;color:#9aa3b2;word-break:break-all;margin:4px 0;");
+  const refreshCur = async () => {
+    try {
+      curUrl.textContent = await invoke<string>("site_url");
+    } catch (e) {
+      curUrl.textContent = String(e);
+    }
+  };
+  void refreshCur();
+  const curRow = el("div", "", "display:flex;gap:8px;align-items:center;");
+  const reloadBtn = button("↻", false, true);
+  reloadBtn.title = "Refresh current URL";
+  reloadBtn.addEventListener("click", () => void refreshCur());
+  curRow.append(el("span", "Now showing:", "font-size:12px;color:#9aa3b2;"), reloadBtn);
+  const targetInput = textInput(cfg.targetUrl, "https://…");
+  const applyBtn = button("Apply & open", true);
+  applyBtn.addEventListener("click", async () => {
+    const url = targetInput.value.trim();
+    if (!/^https:\/\//.test(url)) {
+      say("Target URL must start with https://", true);
+      return;
+    }
+    try {
+      const next = await currentConfig();
+      next.targetUrl = url;
+      await invoke("save_config", { config: { ...next, firebase: { ...next.firebase, token: "" } } });
+      await invoke("navigate_site", { url });
+      say("Site webview navigating…");
+      void refreshCur();
+    } catch (e) {
+      say(String(e), true);
+    }
+  });
+  const applyRow = el("div", "", "display:flex;gap:8px;margin-top:6px;");
+  applyRow.append(applyBtn);
+  siteSec.append(curRow, curUrl, row("Target URL", targetInput), applyRow);
+  box.append(siteSec);
+
+  // ---- connection ----
+  const connSec = section("Connection");
   const dbUrl = textInput(cfg.firebase.databaseURL, "https://YOUR-PROJECT-default-rtdb.firebaseio.com");
   const node = textInput(cfg.firebase.node, "muse-local");
-  const targetUrl = textInput(cfg.targetUrl, "https://messages.google.com/web");
-  box.append(row("Firebase database URL", dbUrl));
-  box.append(row("Firebase node", node));
-  box.append(row("Target URL (opened in the app webview)", targetUrl));
+  connSec.append(row("Firebase database URL", dbUrl), row("Firebase node", node));
 
-  box.append(el("h2", "Human input", "font-size:1rem;margin:18px 0 4px;color:#9fd0ff;"));
-  const [wpmSlider] = slider(15, 160, 1, cfg.humanInput.typingWpm);
-  const [speedSlider] = slider(0.25, 4, 0.05, cfg.humanInput.mouseSpeed);
-  box.append(row("Typing speed (words per minute)", wpmSlider.parentElement!));
-  box.append(row("Mouse replay speed (1.0 = as you recorded it)", speedSlider.parentElement!));
-  box.append(
-    el(
-      "p",
-      "Typing adds natural variance, longer pauses on spaces and sentence ends, and occasional thinking pauses. Mouse replays transform your real recorded movements; the speed slider only scales tempo, never the trajectory.",
-      "font-size:12px;color:#9aa3b2;"
-    )
-  );
-
-  box.append(el("h2", "Firebase token", "font-size:1rem;margin:18px 0 4px;color:#9fd0ff;"));
-  const tokenState = el("p", "", "font-size:14px;");
+  const tokenState = el("p", "", "font-size:12px;color:#9aa3b2;margin:4px 0;");
   const refreshTokenState = async () => {
-    const c = withDefaults(await invoke<LocalConfig>("get_config"));
-    tokenState.textContent = c.firebase.token ? "Token is set ✓ (in Windows Credential Manager)" : "No token set.";
+    const c = await currentConfig();
+    tokenState.textContent = c.firebase.token
+      ? "Token is set ✓ (Windows Credential Manager)"
+      : "No token set — commands cannot be received.";
   };
+  void refreshTokenState();
   const tokenInput = el("input") as HTMLInputElement;
   tokenInput.type = "password";
   tokenInput.placeholder = "Paste new token to replace";
-  tokenInput.style.cssText =
-    "width:100%;box-sizing:border-box;padding:8px;font-size:14px;" +
-    "background:#14161a;color:#e8e8e8;border:1px solid #2c313a;border-radius:6px;";
-  const tokenBtns = el("div", "", "display:flex;gap:10px;margin-top:8px;");
-  const saveTokenBtn = button("Save token", true);
-  const delTokenBtn = button("Delete token");
+  tokenInput.style.cssText = textInput("").style.cssText;
+  const tokenBtns = el("div", "", "display:flex;gap:8px;margin-top:6px;");
+  const saveTokenBtn = button("Save token", true, true);
+  const delTokenBtn = button("Delete", false, true);
   tokenBtns.append(saveTokenBtn, delTokenBtn);
-  box.append(tokenState, row("Replace token (letters and numbers only)", tokenInput), tokenBtns);
-  void refreshTokenState();
-
   saveTokenBtn.addEventListener("click", async () => {
     const t = tokenInput.value.trim();
     if (!/^[A-Za-z0-9]+$/.test(t)) {
-      showMsg("Token must be letters and numbers only.", true);
+      say("Token must be letters and numbers only.", true);
       return;
     }
     try {
       await invoke("set_firebase_token", { token: t });
       tokenInput.value = "";
       await refreshTokenState();
-      showMsg("Token saved to Credential Manager.");
+      say("Token saved to Credential Manager.");
     } catch (e) {
-      showMsg(String(e), true);
+      say(String(e), true);
     }
   });
   delTokenBtn.addEventListener("click", async () => {
     try {
       await invoke("delete_firebase_token");
       await refreshTokenState();
-      showMsg("Token deleted — the app will prompt for it on next start.");
+      say("Token deleted.");
     } catch (e) {
-      showMsg(String(e), true);
+      say(String(e), true);
     }
   });
+  connSec.append(tokenState, row("Replace token", tokenInput), tokenBtns);
+  box.append(connSec);
 
-  const msgEl = el("p", "", "font-size:14px;min-height:20px;");
-  const btns = el("div", "", "display:flex;gap:10px;margin-top:18px;");
+  // ---- human input ----
+  const humSec = section("Human input");
+  const [wpmSlider] = slider(15, 160, 1, cfg.humanInput.typingWpm, (v) => `${v} wpm`);
+  const [speedSlider] = slider(0.25, 4, 0.05, cfg.humanInput.mouseSpeed, (v) => `${v.toFixed(2)}×`);
+  humSec.append(row("Typing speed", wpmSlider.parentElement!));
+  humSec.append(row("Mouse replay tempo", speedSlider.parentElement!));
+  humSec.append(
+    el(
+      "p",
+      "Typing adds natural variance and thinking pauses. Mouse replays transform your real recorded movements; tempo only scales speed, never the path.",
+      "font-size:11px;color:#9aa3b2;margin:4px 0 0;"
+    )
+  );
   const saveBtn = button("Save settings", true);
-  const backBtn = button("Back");
-  btns.append(saveBtn, backBtn);
-  box.append(msgEl, btns);
-  document.body.append(box);
-
-  function showMsg(text: string, isErr = false) {
-    msgEl.textContent = text;
-    msgEl.style.color = isErr ? "#ff9d9d" : "#9fe8b8";
-  }
-
   saveBtn.addEventListener("click", async () => {
-    const next = withDefaults({
-      firebase: {
-        databaseURL: dbUrl.value.trim(),
-        node: node.value.trim() || "muse-local",
-        token: "",
-      },
-      humanInput: {
-        typingWpm: Number(wpmSlider.value),
-        mouseSpeed: Number(speedSlider.value),
-      },
-      targetUrl: targetUrl.value.trim(),
-    });
     try {
-      await invoke("save_config", { config: next });
-      showMsg("Settings saved.");
+      const next = await currentConfig();
+      next.firebase.databaseURL = dbUrl.value.trim();
+      next.firebase.node = node.value.trim() || "muse-local";
+      next.humanInput.typingWpm = Number(wpmSlider.value);
+      next.humanInput.mouseSpeed = Number(speedSlider.value);
+      await invoke("save_config", {
+        config: { ...next, firebase: { ...next.firebase, token: "" } },
+      });
+      say("Settings saved.");
     } catch (e) {
-      showMsg(String(e), true);
+      say(String(e), true);
     }
   });
-  backBtn.addEventListener("click", async () => {
-    const c = withDefaults(await invoke<LocalConfig>("get_config"));
-    if (!c.firebase.databaseURL.startsWith("https://")) {
-      showMsg("Set a valid Firebase database URL first.", true);
+  const saveRow = el("div", "", "margin-top:8px;");
+  saveRow.append(saveBtn);
+  humSec.append(saveRow);
+  box.append(humSec);
+
+  // ---- recordings ----
+  const recSec = section("Mouse recordings");
+  const recList = el("div", "", "margin:4px 0;");
+  const refreshRecs = async () => {
+    recList.innerHTML = "";
+    let recs: RecordingInfo[];
+    try {
+      recs = await invoke<RecordingInfo[]>("list_recordings");
+    } catch (e) {
+      recList.append(el("p", String(e), "font-size:12px;color:#ff9d9d;"));
       return;
     }
-    statusView(c);
+    if (!recs.length) {
+      recList.append(el("p", "No recordings yet.", "font-size:12px;color:#9aa3b2;"));
+      return;
+    }
+    for (const r of recs) {
+      const line = el("div", "", "display:flex;align-items:center;gap:8px;font-size:12px;margin:4px 0;");
+      line.append(el("span", `${r.id} · ${r.points} pts`, "flex:1;"));
+      const del = button("Delete", false, true);
+      del.addEventListener("click", async () => {
+        try {
+          await invoke("delete_recording", { id: r.id });
+          void refreshRecs();
+        } catch (e) {
+          say(String(e), true);
+        }
+      });
+      line.append(del);
+      recList.append(line);
+    }
+  };
+  void refreshRecs();
+  const recBtns = el("div", "", "display:flex;gap:8px;margin-top:6px;");
+  const startBtn = button("Start recording");
+  const stopBtn = button("Stop");
+  recBtns.append(startBtn, stopBtn);
+  const recMsg = el("p", "Move the mouse naturally while recording.", "font-size:11px;color:#9aa3b2;margin:4px 0 0;");
+  startBtn.addEventListener("click", async () => {
+    try {
+      await invoke("start_recording");
+      recMsg.textContent = "Recording… move the mouse naturally, then Stop.";
+      say("");
+    } catch (e) {
+      say(String(e), true);
+    }
   });
+  stopBtn.addEventListener("click", async () => {
+    try {
+      const info = await invoke<RecordingInfo>("stop_recording");
+      recMsg.textContent = `Saved ${info.id} (${info.points} points).`;
+      void refreshRecs();
+    } catch (e) {
+      say(String(e), true);
+    }
+  });
+  recSec.append(recList, recBtns, recMsg);
+  box.append(recSec);
+
+  // ---- test ----
+  const testSec = section("Connection test");
+  const pingBtn = button("Send ping");
+  const pingOut = el("p", "", "font-size:12px;color:#9aa3b2;margin:6px 0 0;");
+  pingBtn.addEventListener("click", async () => {
+    pingOut.textContent = "pinging…";
+    try {
+      const c = await currentConfig();
+      if (!c.firebase.databaseURL.startsWith("https://") || !c.firebase.token) {
+        pingOut.textContent = "Set the database URL and token first.";
+        return;
+      }
+      pingOut.textContent = await sendPing(c);
+    } catch (e) {
+      pingOut.textContent = String(e);
+    }
+  });
+  testSec.append(pingBtn, pingOut);
+  box.append(testSec);
+
+  document.body.append(box);
 }
 
 async function boot() {
   try {
-    await invoke("set_home_url", { url: window.location.href });
-  } catch {
-    // non-fatal
-  }
-  let cfg: LocalConfig;
-  try {
-    cfg = withDefaults(await invoke<LocalConfig>("get_config"));
+    await render();
   } catch (e) {
     document.body.innerHTML = "";
-    const box = el("div", "", "text-align:center;max-width:560px;padding:2rem;");
-    box.append(el("h1", "Muse Local"));
-    box.append(el("p", `Could not read config: ${String(e)}`, "color:#ff9d9d;"));
-    document.body.append(box);
-    return;
+    document.body.append(el("p", `Sidebar failed to load: ${String(e)}`, "color:#ff9d9d;padding:16px;"));
   }
-  if (!cfg.firebase.databaseURL.startsWith("https://")) {
-    settingsView(cfg, "Finish setup: enter your Firebase database URL below.");
-    return;
-  }
-  statusView(cfg);
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());

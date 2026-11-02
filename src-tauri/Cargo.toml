@@ -1,6 +1,6 @@
 [package]
 name = "muse-local"
-version = "0.1.0"
+version = "0.2.0"
 description = "Muse Local — desktop browser automation with human-like native input"
 authors = ["you"]
 edition = "2021"
@@ -15,7 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["unstable"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5.0"

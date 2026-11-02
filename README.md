@@ -7,11 +7,15 @@ vanilla TS + Vite + NSIS installer).
 
 ## How it works
 
-- The app opens a normal window whose webview navigates to a configurable
-  target URL (default: Google Messages web).
-- A control script (`src/control.ts`) is injected into **every page** via
-  Tauri's `initialization_script` — the same job a content script did in the
-  extension, without any extension plumbing.
+- The app opens one window split in two: a **sidebar** on the left (the
+  app's control panel — settings, recordings, connection test) and the
+  **target website** on the right (default: Google Messages web). The
+  sidebar is always visible, so it's always clear what is the app and what
+  is the website. The split survives window resizes (sidebar stays 320px).
+- A control script (`src/control.ts`) is injected into **every page** of
+  the site webview via Tauri's `initialization_script` — the same job a
+  content script did in the extension, without any extension plumbing. It
+  re-runs on every navigation, so the bridge survives page changes.
 - The script listens on a Firebase Realtime Database command channel
   (EventSource with polling fallback). Muse writes a command, the app
   executes it in the page, and PUTs the result back.
@@ -37,9 +41,11 @@ vanilla TS + Vite + NSIS installer).
    scripts do this automatically.
 4. `npm run tauri:dev`
 5. First run: the app seeds `Documents/muse-local/config.json` from the
-   bundled default. Fill in your Firebase values (see below), restart,
-   then **sign into Google and pair Messages inside the app's webview**
-   (fresh profile — one-time).
+   bundled default. Fill in your Firebase values in the **sidebar** (left
+   pane), then **pair Messages via QR code inside the site webview**
+   (fresh profile — one-time). Use QR pairing, not Google sign-in: Google
+   blocks sign-in from unrecognized embedded browsers, but QR pairing is
+   phone-to-browser and skips that check entirely.
 
 Build the installer: `npm run tauri:build` → NSIS `.exe` in
 `src-tauri/target/release/bundle/nsis`.
@@ -64,24 +70,32 @@ Windows Credential Manager and let the app prompt again).
 `databaseURL`, `node`, and `targetUrl` stay in plaintext `config.json` —
 they're identifiers, not secrets.
 
-## Settings screen
+## Sidebar (control panel)
 
-The loader page is a real settings screen — no JSON editing needed:
+The left pane is the app — no JSON editing needed:
 
-- **Connection**: Firebase database URL, node, target URL.
+- **Website**: shows the site webview's current URL; change the target URL
+  and Apply to save it and navigate the site pane live.
+- **Connection**: Firebase database URL, node, and token (set / replace /
+  delete — Credential Manager, see Secrets).
 - **Human input**: typing speed slider (15–160 WPM) and mouse replay speed
   slider (0.25–4.0×). Typing gets per-keystroke variance, longer pauses on
   spaces and sentence ends, and occasional thinking pauses. Mouse speed only
   scales replay tempo — the trajectory is always your transformed recording.
-- **Firebase token**: set / replace / delete (Credential Manager).
+- **Mouse recordings**: record your real mouse movements (Start/Stop),
+  list them, delete the duds.
+- **Connection test**: sends a `ping` command through Firebase and reports
+  the round-trip — the fastest way to verify the whole chain works.
 
-The ⚙ button on the in-page badge jumps back to settings from any target
-page. Settings are also in `config.json` under `humanInput` if you prefer
+Settings are also in `config.json` under `humanInput` if you prefer
 the file:
 
 ```json
 "humanInput": { "typingWpm": 55, "mouseSpeed": 1.0 }
 ```
+
+The in-page badge on the website is status-only (no settings gear — the
+sidebar is always right there).
 
 ## Config — Documents/muse-local/config.json
 
@@ -100,6 +114,14 @@ the file:
 The token **must be letters and numbers only** — Firebase forbids
 `$ . # [ ] /` in paths and the token is part of the path
 (`muse-local/<token>/commands`, `muse-local/<token>/results`).
+
+**Remote-site IPC:** the injected script can only call Tauri commands on a
+remote page if the capability allows that origin — see
+`src-tauri/capabilities/default.json` (`remote.urls`, currently
+`https://messages.google.com/*`). If you point `targetUrl` at a different
+site, widen that pattern or the badge will sit at "config error" and
+commands won't run. (This was the actual cause of the old "settings
+unavailable" gear failure.)
 
 ## Firebase security rules
 
