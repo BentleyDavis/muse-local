@@ -1,7 +1,7 @@
 {
   "firebase": {
     "databaseURL": "https://YOUR-PROJECT-default-rtdb.firebaseio.com",
-    "node": "muse-local",
+    "node": "muse",
     "token": ""
   },
   "humanInput": {

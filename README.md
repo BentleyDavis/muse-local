@@ -107,7 +107,7 @@ sidebar is always right there).
   "version": 1,
   "firebase": {
     "databaseURL": "https://YOUR-PROJECT-default-rtdb.firebaseio.com",
-    "node": "muse-local",
+    "node": "muse",
     "token": ""
   },
   "targetUrl": "https://messages.google.com/web"
@@ -116,7 +116,7 @@ sidebar is always right there).
 
 The token **must be letters and numbers only** — Firebase forbids
 `$ . # [ ] /` in paths and the token is part of the path
-(`muse-local/<token>/commands`, `muse-local/<token>/results`).
+(`muse/<token>/commands`, `muse/<token>/results`).
 
 **Remote-site IPC:** the injected script can only call Tauri commands on a
 remote page if the capability allows that origin — see
@@ -131,7 +131,7 @@ unavailable" gear failure.)
 ```json
 {
   "rules": {
-    "muse-local": {
+    "muse": {
       "$token": {
         ".read": true,
         "commands": {
@@ -150,10 +150,8 @@ Read is open under the unguessable token path (the app must stream
 commands, Muse must read results). Writes must carry the token in the body;
 the `!newData.exists()` clause lets either side delete its own nodes.
 
-> If you're reusing the Firebase project from the old browser extension:
-> its rules were written for the `muse` node, while this app uses
-> `muse-local`. Paste the rules above into the Firebase console (Realtime
-> Database → Rules) or the app's writes will be denied.
+The node is `muse` — the same one the old browser extension used, so
+existing Firebase rules and tokens keep working unchanged.
 
 ## Troubleshooting
 
@@ -166,21 +164,22 @@ the `!newData.exists()` clause lets either side delete its own nodes.
   console (Realtime Database → the URL at the top) into the sidebar's
   Database URL field and Save.
 - **Ping says `write failed (HTTP 401)`**: the database exists but the
-  security rules reject the write — see the rules section above.
+  security rules reject the write — the rules must allow the `muse` node
+  with the token-in-path scheme (see the rules section above).
 
 ## Command protocol
 
 Muse sends a command with a REST PUT:
 
 ```
-PUT https://<db>/muse-local/<token>/commands/<id>.json
+PUT https://<db>/muse/<token>/commands/<id>.json
 { "token": "<token>", "action": "ping", "args": { ... } }
 ```
 
 The app deletes the command node, executes, then writes:
 
 ```
-PUT https://<db>/muse-local/<token>/results/<id>.json
+PUT https://<db>/muse/<token>/results/<id>.json
 { "token": "<token>", "ok": true, "result": { ... }, "ts": 123 }
 ```
 

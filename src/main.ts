@@ -27,7 +27,7 @@ interface RecordingInfo {
 
 const DEFAULTS: LocalConfig = {
   version: 1,
-  firebase: { databaseURL: "", node: "muse-local", token: "" },
+  firebase: { databaseURL: "", node: "muse", token: "" },
   humanInput: { typingWpm: 55, mouseSpeed: 1.0 },
   targetUrl: "https://messages.google.com/web",
   sidebarWidth: 400,
@@ -222,7 +222,7 @@ async function render() {
   // ---- connection ----
   const connSec = section("Connection");
   const dbUrl = textInput(cfg.firebase.databaseURL, "https://YOUR-PROJECT-default-rtdb.firebaseio.com");
-  const node = textInput(cfg.firebase.node, "muse-local");
+  const node = textInput(cfg.firebase.node, "muse");
   connSec.append(row("Firebase database URL", dbUrl), row("Firebase node", node));
 
   const tokenState = el("p", "", "font-size:12px;color:#9aa3b2;margin:4px 0;");
@@ -286,7 +286,7 @@ async function render() {
     try {
       const next = await currentConfig();
       next.firebase.databaseURL = dbUrl.value.trim();
-      next.firebase.node = node.value.trim() || "muse-local";
+      next.firebase.node = node.value.trim() || "muse";
       next.humanInput.typingWpm = Number(wpmSlider.value);
       next.humanInput.mouseSpeed = Number(speedSlider.value);
       await invoke("save_config", {
