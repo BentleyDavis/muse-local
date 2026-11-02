@@ -187,10 +187,11 @@ while (remaining.size > 0 && Date.now() - t0 < TIME_CAP) {
 const leftover = [...remaining].map((d) => targetToAddr.get(d));
 const summary = {
   archived,
-  remaining: leftover.length,
-  failed: failed.length,
-  remainingSample: leftover.slice(0, 20),
-  failedSample: failed.slice(0, 10),
+  remainingCount: leftover.length,
+  failedCount: failed.length,
+  // Full lists for reference — copy from the Run output panel.
+  notFoundAddresses: leftover,
+  failedAddresses: failed,
 };
-await muse.log(`Done. Archived ${archived}. Remaining: ${leftover.length}. Failed: ${failed.length}.`);
+await muse.log(`Done. Archived ${archived}. Not found: ${leftover.length}. Failed: ${failed.length}. Full lists are in the result above.`);
 return summary;
