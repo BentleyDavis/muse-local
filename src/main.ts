@@ -3,6 +3,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { executeAction, type ActionContext } from "./actions";
 import { FirebaseChannel, SerialQueue, type QueueEntry } from "./firebase";
+import { createRecordingPage } from "./recording-page";
+import { button, el, section } from "./ui";
 
 const VERSION = "0.2.0";
 
@@ -17,13 +19,6 @@ interface LocalConfig {
   humanInput: HumanInput;
   targetUrl: string;
   sidebarWidth: number;
-}
-
-interface RecordingInfo {
-  id: string;
-  points: number;
-  lengthPx: number;
-  created: string;
 }
 
 const DEFAULTS: LocalConfig = {
@@ -110,23 +105,6 @@ function buildConsole(): HTMLElement {
 
 // ---------- tiny DOM helpers ----------
 
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  text = "",
-  css = ""
-): HTMLElementTagNameMap[K] {
-  const n = document.createElement(tag);
-  if (text) n.textContent = text;
-  if (css) n.style.cssText = css;
-  return n;
-}
-
-function section(title: string): HTMLElement {
-  const s = el("div", "", "margin:14px 0 0;");
-  s.append(el("h2", title, "font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#9fd0ff;margin:0 0 6px;"));
-  return s;
-}
-
 function row(labelText: string, input: HTMLElement): HTMLElement {
   const r = el("div", "", "margin:8px 0;");
   const lab = el("label", labelText, "display:block;font-size:12px;color:#9aa3b2;margin-bottom:3px;");
@@ -168,15 +146,6 @@ function slider(
   s.addEventListener("input", () => (val.textContent = fmt(Number(s.value))));
   wrap.append(s, val);
   return [s, wrap];
-}
-
-function button(text: string, primary = false, small = false): HTMLButtonElement {
-  const b = el("button", text) as HTMLButtonElement;
-  b.style.cssText =
-    (small ? "padding:5px 10px;font-size:12px;" : "padding:7px 14px;font-size:13px;") +
-    "cursor:pointer;border-radius:6px;border:none;" +
-    (primary ? "background:#1d4ed8;color:#fff;" : "background:#2c313a;color:#e8e8e8;");
-  return b;
 }
 
 // ---------- sidebar ----------
@@ -357,7 +326,10 @@ async function render() {
   document.body.style.cssText =
     "margin:0;display:flex;flex-direction:column;height:100vh;overflow:hidden;";
 
-  const box = el("div", "", "padding:14px 14px 24px;");
+  const box = el("section", "", "padding:14px 14px 24px;");
+  box.setAttribute("aria-label", "Settings");
+  const content = el("main", "", "flex:1;overflow-y:auto;min-height:0;");
+  let recordingPage: ReturnType<typeof createRecordingPage> | null = null;
   const ready = cfg.firebase.databaseURL.startsWith("https://") && !!cfg.firebase.token;
 
   // header
@@ -537,61 +509,25 @@ async function render() {
 
   // ---- recordings ----
   const recSec = section("Mouse recordings");
-  const recList = el("div", "", "margin:4px 0;");
-  const refreshRecs = async () => {
-    recList.innerHTML = "";
-    let recs: RecordingInfo[];
-    try {
-      recs = await invoke<RecordingInfo[]>("list_recordings");
-    } catch (e) {
-      recList.append(el("p", String(e), "font-size:12px;color:#ff9d9d;"));
-      return;
-    }
-    if (!recs.length) {
-      recList.append(el("p", "No recordings yet.", "font-size:12px;color:#9aa3b2;"));
-      return;
-    }
-    for (const r of recs) {
-      const line = el("div", "", "display:flex;align-items:center;gap:8px;font-size:12px;margin:4px 0;");
-      line.append(el("span", `${r.id} · ${r.points} pts`, "flex:1;"));
-      const del = button("Delete", false, true);
-      del.addEventListener("click", async () => {
-        try {
-          await invoke("delete_recording", { id: r.id });
-          void refreshRecs();
-        } catch (e) {
-          say(String(e), true);
-        }
-      });
-      line.append(del);
-      recList.append(line);
-    }
-  };
-  void refreshRecs();
-  const recBtns = el("div", "", "display:flex;gap:8px;margin-top:6px;");
-  const startBtn = button("Start recording");
-  const stopBtn = button("Stop");
-  recBtns.append(startBtn, stopBtn);
-  const recMsg = el("p", "Move the mouse naturally while recording.", "font-size:11px;color:#9aa3b2;margin:4px 0 0;");
-  startBtn.addEventListener("click", async () => {
-    try {
-      await invoke("start_recording");
-      recMsg.textContent = "Recording… move the mouse naturally, then Stop.";
-      say("");
-    } catch (e) {
-      say(String(e), true);
-    }
+  const recordBtn = button("Record movements…");
+  recordBtn.addEventListener("click", () => {
+    if (recordingPage) return;
+    const settingsScrollTop = content.scrollTop;
+    recordingPage = createRecordingPage({
+      onDone: () => {
+        recordingPage?.dispose();
+        recordingPage = null;
+        content.replaceChildren(box);
+        content.scrollTop = settingsScrollTop;
+        recordBtn.focus({ preventScroll: true });
+      },
+      onError: (message) => appendLog("recording", "err", message),
+    });
+    content.replaceChildren(recordingPage.element);
+    content.scrollTop = 0;
+    recordingPage.mount();
   });
-  stopBtn.addEventListener("click", async () => {
-    try {
-      const info = await invoke<RecordingInfo>("stop_recording");
-      recMsg.textContent = `Saved ${info.id} (${info.points} points).`;
-      void refreshRecs();
-    } catch (e) {
-      say(String(e), true);
-    }
-  });
-  recSec.append(recList, recBtns, recMsg);
+  recSec.append(recordBtn);
   box.append(recSec);
 
   // ---- test ----
@@ -624,7 +560,6 @@ async function render() {
   box.append(testSec);
 
   // Scrollable settings above, resizable console pinned to the bottom.
-  const content = el("div", "", "flex:1;overflow-y:auto;min-height:0;");
   content.append(box);
   document.body.append(content, buildConsole());
   installDragHandle();

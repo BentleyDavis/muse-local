@@ -17,6 +17,7 @@ fn main() {
             "type_text",
             "start_recording",
             "stop_recording",
+            "recording_status",
             "list_recordings",
             "load_recording",
             "delete_recording",

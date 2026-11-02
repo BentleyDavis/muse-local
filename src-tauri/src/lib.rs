@@ -343,6 +343,7 @@ pub fn run() {
             input::type_text,
             input::start_recording,
             input::stop_recording,
+            input::recording_status,
             input::list_recordings,
             input::load_recording,
             input::delete_recording,

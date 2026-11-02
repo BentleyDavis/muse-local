@@ -76,7 +76,9 @@ fn site_frame(site: &tauri::Webview) -> Result<PointerFrame, String> {
     if position.x < 0 || position.y < 0 {
         return Err("target webpage has an invalid client position".to_string());
     }
-    let width = size.width.min(client.width.saturating_sub(position.x as u32));
+    let width = size
+        .width
+        .min(client.width.saturating_sub(position.x as u32));
     let height = size
         .height
         .min(client.height.saturating_sub(position.y as u32));
@@ -131,9 +133,25 @@ pub struct RecPoint {
     pub y: i32,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingStatus {
+    active: bool,
+    saved: usize,
+    discarded: usize,
+    current_points: usize,
+    idle_ms: u64,
+    pause_ms: u64,
+    saving: bool,
+    in_controls: bool,
+    stopped_by: Option<String>,
+    error: Option<String>,
+}
+
 #[cfg(windows)]
 mod win {
-    use super::{PointerFrame, RecPoint, RecordingInfo, ScreenPoint, TimedPoint};
+    use super::{PointerFrame, RecPoint, RecordingInfo, RecordingStatus, ScreenPoint, TimedPoint};
+    use std::collections::VecDeque;
     use std::sync::{Mutex, OnceLock};
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -159,7 +177,8 @@ mod win {
         unsafe {
             if GetForegroundWindow() != hwnd || IsIconic(hwnd) != 0 || IsWindowVisible(hwnd) == 0 {
                 return Err(
-                    "app must be visible and in the foreground for native pointer input".to_string(),
+                    "app must be visible and in the foreground for native pointer input"
+                        .to_string(),
                 );
             }
             if MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONULL).is_null() {
@@ -167,9 +186,7 @@ mod win {
             }
             let hit = WindowFromPoint(POINT { x, y });
             if hit.is_null() || GetAncestor(hit, GA_ROOT) != hwnd {
-                return Err(
-                    "target webpage is covered or outside the visible desktop".to_string(),
-                );
+                return Err("target webpage is covered or outside the visible desktop".to_string());
             }
             let mut client_point = POINT { x, y };
             let mut client_rect = std::mem::zeroed();
@@ -210,10 +227,10 @@ mod win {
             return Err("virtual desktop exceeds absolute pointer resolution".to_string());
         }
         Ok((
-            (((i64::from(x) - i64::from(left)) * 65536 + 32768) / i64::from(width))
-                .min(65535) as i32,
-            (((i64::from(y) - i64::from(top)) * 65536 + 32768) / i64::from(height))
-                .min(65535) as i32,
+            (((i64::from(x) - i64::from(left)) * 65536 + 32768) / i64::from(width)).min(65535)
+                as i32,
+            (((i64::from(y) - i64::from(top)) * 65536 + 32768) / i64::from(height)).min(65535)
+                as i32,
         ))
     }
 
@@ -241,7 +258,10 @@ mod win {
             dx: ax,
             dy: ay,
             mouseData: 0,
-            dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | button_flag,
+            dwFlags: MOUSEEVENTF_MOVE
+                | MOUSEEVENTF_ABSOLUTE
+                | MOUSEEVENTF_VIRTUALDESK
+                | button_flag,
             time: 0,
             dwExtraInfo: 0,
         })
@@ -402,10 +422,21 @@ mod win {
         active: bool,
         start: Option<Instant>,
         points: Vec<RecPoint>,
+        last_move: Option<Instant>,
+        pending: VecDeque<Vec<RecPoint>>,
+        saved: usize,
+        discarded: usize,
+        saving: bool,
+        in_controls: bool,
+        stopped_by: Option<String>,
+        error: Option<String>,
+        sidebar: Option<tauri::Webview>,
+        excluded: Option<(i32, i32, u32, u32)>,
     }
 
+    const MOVEMENT_PAUSE_MS: u64 = 1500;
     static REC: OnceLock<Mutex<RecState>> = OnceLock::new();
-    static HOOK_THREAD: OnceLock<()> = OnceLock::new();
+    static HOOK_THREAD: OnceLock<Result<(), String>> = OnceLock::new();
 
     fn rec_state() -> &'static Mutex<RecState> {
         REC.get_or_init(|| {
@@ -413,25 +444,103 @@ mod win {
                 active: false,
                 start: None,
                 points: Vec::new(),
+                last_move: None,
+                pending: VecDeque::new(),
+                saved: 0,
+                discarded: 0,
+                saving: false,
+                in_controls: false,
+                stopped_by: None,
+                error: None,
+                sidebar: None,
+                excluded: None,
             })
+        })
+    }
+
+    fn finish_movement(st: &mut RecState, discard: bool) {
+        let points = std::mem::take(&mut st.points);
+        st.start = None;
+        st.last_move = None;
+        if points.is_empty() {
+            return;
+        }
+        let usable = points.len() >= 3
+            && path_length(&points) >= 8.0
+            && points
+                .first()
+                .zip(points.last())
+                .is_some_and(|(first, last)| {
+                    (f64::from(last.x) - f64::from(first.x))
+                        .hypot(f64::from(last.y) - f64::from(first.y))
+                        >= 4.0
+                });
+        if discard || !usable {
+            st.discarded += 1;
+        } else {
+            st.pending.push_back(points);
+        }
+    }
+
+    fn is_excluded(st: &RecState, x: i32, y: i32) -> bool {
+        st.excluded.is_none_or(|(left, top, width, height)| {
+            i64::from(x) >= i64::from(left)
+                && i64::from(y) >= i64::from(top)
+                && i64::from(x) < i64::from(left) + i64::from(width)
+                && i64::from(y) < i64::from(top) + i64::from(height)
         })
     }
 
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         // Note: in windows-sys 0.59 WPARAM/LPARAM are primitive aliases
         // (usize/isize), not tuple structs — no `.0` field access.
-        if code >= 0 && wparam as u32 == WM_MOUSEMOVE {
+        if code >= 0 {
             let info = &*(lparam as *const MSLLHOOKSTRUCT);
+            if info.flags & LLMHF_INJECTED != 0 {
+                return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+            }
             if let Ok(mut st) = rec_state().lock() {
                 if st.active {
+                    if is_excluded(&st, info.pt.x, info.pt.y) {
+                        // Drop the whole unfinished approach, not just the
+                        // portion over Stop/Done.
+                        finish_movement(&mut st, true);
+                        st.in_controls = true;
+                        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+                    }
+                    st.in_controls = false;
+                    if matches!(
+                        wparam as u32,
+                        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
+                    ) {
+                        finish_movement(&mut st, false);
+                    }
+                    if wparam as u32 != WM_MOUSEMOVE {
+                        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+                    }
+                    if st.last_move.is_some_and(|last| {
+                        last.elapsed().as_millis() >= u128::from(MOVEMENT_PAUSE_MS)
+                    }) {
+                        finish_movement(&mut st, false);
+                    }
                     let start = *st.start.get_or_insert_with(Instant::now);
                     let t = start.elapsed().as_millis() as u64;
+                    let moved = st
+                        .points
+                        .last()
+                        .is_none_or(|previous| previous.x != info.pt.x || previous.y != info.pt.y);
+                    if !moved {
+                        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+                    }
+                    st.last_move = Some(Instant::now());
                     // Thin out: keep a point only if it moved >= 2px or
                     // >= 16ms elapsed since the previous kept point.
                     let keep = match st.points.last() {
                         None => true,
                         Some(prev) => {
-                            (info.pt.x - prev.x).abs() + (info.pt.y - prev.y).abs() >= 2
+                            (i64::from(info.pt.x) - i64::from(prev.x)).abs()
+                                + (i64::from(info.pt.y) - i64::from(prev.y)).abs()
+                                >= 2
                                 || t.saturating_sub(prev.t) >= 16
                         }
                     };
@@ -448,21 +557,158 @@ mod win {
         CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
     }
 
-    fn ensure_hook_thread() {
-        HOOK_THREAD.get_or_init(|| {
-            std::thread::spawn(|| unsafe {
-                // WH_MOUSE_LL must live on a thread that pumps messages.
-                let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), std::ptr::null_mut(), 0);
-                if hook.is_null() {
+    unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 && matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
+            let info = &*(lparam as *const KBDLLHOOKSTRUCT);
+            if info.vkCode == u32::from(VK_ESCAPE) && info.flags & LLKHF_INJECTED == 0 {
+                if let Ok(mut st) = rec_state().lock() {
+                    if st.active {
+                        st.active = false;
+                        st.stopped_by = Some("Escape".to_string());
+                        finish_movement(&mut st, false);
+                    }
+                }
+            }
+        }
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+
+    fn sidebar_bounds(sidebar: &tauri::Webview) -> Result<(i32, i32, u32, u32), String> {
+        let origin = sidebar
+            .window()
+            .inner_position()
+            .map_err(|e| e.to_string())?;
+        let position = sidebar.position().map_err(|e| e.to_string())?;
+        let size = sidebar.size().map_err(|e| e.to_string())?;
+        Ok((
+            origin
+                .x
+                .checked_add(position.x)
+                .ok_or("invalid sidebar x")?,
+            origin
+                .y
+                .checked_add(position.y)
+                .ok_or("invalid sidebar y")?,
+            size.width,
+            size.height,
+        ))
+    }
+
+    fn recording_worker() {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let sidebar = match rec_state().lock() {
+                Ok(st) => {
+                    if !st.active && !st.saving && st.pending.is_empty() {
+                        continue;
+                    }
+                    st.sidebar.clone()
+                }
+                Err(error) => {
+                    eprintln!("recording worker state failed: {error}");
                     return;
                 }
-                let mut msg: MSG = std::mem::zeroed();
-                while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
+            };
+            let bounds = sidebar.as_ref().map(sidebar_bounds).transpose();
+            let points = {
+                let Ok(mut st) = rec_state().lock() else {
+                    return;
+                };
+                match bounds {
+                    Ok(bounds) => st.excluded = bounds,
+                    Err(error) => {
+                        st.active = false;
+                        st.error = Some(format!("Recording stopped: {error}"));
+                        finish_movement(&mut st, true);
+                    }
                 }
-            });
-        });
+                if st.active
+                    && st.last_move.is_some_and(|last| {
+                        last.elapsed().as_millis() >= u128::from(MOVEMENT_PAUSE_MS)
+                    })
+                {
+                    finish_movement(&mut st, false);
+                }
+                let points = st.pending.pop_front();
+                st.saving = points.is_some();
+                points
+            };
+            if let Some(points) = points {
+                let saved = save_movement(&points);
+                let Ok(mut st) = rec_state().lock() else {
+                    return;
+                };
+                st.saving = false;
+                match saved {
+                    Ok(()) => {
+                        st.saved += 1;
+                        if st
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.starts_with("Movement not saved;"))
+                        {
+                            st.error = None;
+                        }
+                    }
+                    Err(error) => {
+                        st.active = false;
+                        st.error = Some(format!("Movement not saved; retrying: {error}"));
+                        st.pending.push_front(points);
+                        finish_movement(&mut st, false);
+                        drop(st);
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            }
+        }
+    }
+
+    fn ensure_hook_thread() -> Result<(), String> {
+        HOOK_THREAD
+            .get_or_init(|| {
+                let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+                std::thread::spawn(move || unsafe {
+                    // WH_MOUSE_LL must live on a thread that pumps messages.
+                    let hook =
+                        SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), std::ptr::null_mut(), 0);
+                    if hook.is_null() {
+                        let _ =
+                            sender.send(Err("Could not install recording mouse hook".to_string()));
+                        return;
+                    }
+                    let keyboard = SetWindowsHookExW(
+                        WH_KEYBOARD_LL,
+                        Some(keyboard_hook),
+                        std::ptr::null_mut(),
+                        0,
+                    );
+                    if keyboard.is_null() {
+                        UnhookWindowsHookEx(hook);
+                        let _ = sender.send(Err(
+                            "Could not install Escape recording shortcut".to_string()
+                        ));
+                        return;
+                    }
+                    std::thread::spawn(recording_worker);
+                    let _ = sender.send(Ok(()));
+                    let mut msg: MSG = std::mem::zeroed();
+                    while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                    UnhookWindowsHookEx(keyboard);
+                    UnhookWindowsHookEx(hook);
+                    if let Ok(mut st) = rec_state().lock() {
+                        st.active = false;
+                        st.error = Some("Recording input hook stopped".to_string());
+                        finish_movement(&mut st, true);
+                    }
+                });
+                receiver
+                    .recv()
+                    .map_err(|e| format!("Recording hook startup failed: {e}"))?
+            })
+            .clone()
     }
 
     fn recordings_dir() -> Result<std::path::PathBuf, String> {
@@ -483,42 +729,84 @@ mod win {
         points
             .windows(2)
             .map(|w| {
-                let dx = (w[1].x - w[0].x) as f64;
-                let dy = (w[1].y - w[0].y) as f64;
+                let dx = f64::from(w[1].x) - f64::from(w[0].x);
+                let dy = f64::from(w[1].y) - f64::from(w[0].y);
                 dx.hypot(dy)
             })
             .sum()
     }
 
-    pub fn start_recording() -> Result<(), String> {
-        ensure_hook_thread();
+    fn save_movement(points: &[RecPoint]) -> Result<(), String> {
+        let dir = recordings_dir()?;
+        let id = format!("rec-{}-{}", epoch_secs(), uuid::Uuid::new_v4());
+        let temporary = dir.join(format!("{id}.tmp"));
+        let destination = dir.join(format!("{id}.json"));
+        let raw = serde_json::to_vec(points).map_err(|e| e.to_string())?;
+        let result = std::fs::write(&temporary, raw)
+            .and_then(|_| std::fs::rename(&temporary, destination))
+            .map_err(|e| e.to_string());
+        if result.is_err() && temporary.exists() {
+            if let Err(error) = std::fs::remove_file(&temporary) {
+                eprintln!("recording temporary file cleanup failed: {error}");
+            }
+        }
+        result
+    }
+
+    pub fn recording_status() -> Result<RecordingStatus, String> {
+        let st = rec_state().lock().map_err(|e| e.to_string())?;
+        Ok(RecordingStatus {
+            active: st.active,
+            saved: st.saved,
+            discarded: st.discarded,
+            current_points: st.points.len(),
+            idle_ms: st
+                .last_move
+                .map(|last| last.elapsed().as_millis() as u64)
+                .unwrap_or(0),
+            pause_ms: MOVEMENT_PAUSE_MS,
+            saving: st.saving || !st.pending.is_empty(),
+            in_controls: st.in_controls,
+            stopped_by: st.stopped_by.clone(),
+            error: st.error.clone(),
+        })
+    }
+
+    pub fn start_recording(sidebar: tauri::Webview) -> Result<RecordingStatus, String> {
+        ensure_hook_thread()?;
+        let excluded = sidebar_bounds(&sidebar)?;
         let mut st = rec_state().lock().map_err(|e| e.to_string())?;
+        if st.active {
+            return Err("a recording session is already running".to_string());
+        }
+        if st.saving || !st.pending.is_empty() {
+            return Err("wait for the previous movements to finish saving".to_string());
+        }
         st.active = true;
         st.start = None;
         st.points.clear();
-        Ok(())
+        st.last_move = None;
+        st.saved = 0;
+        st.discarded = 0;
+        st.stopped_by = None;
+        st.error = None;
+        st.sidebar = Some(sidebar);
+        st.excluded = Some(excluded);
+        st.in_controls = true;
+        drop(st);
+        recording_status()
     }
 
-    pub fn stop_recording() -> Result<RecordingInfo, String> {
-        let (points, id) = {
+    pub fn stop_recording(discard_current: bool) -> Result<RecordingStatus, String> {
+        {
             let mut st = rec_state().lock().map_err(|e| e.to_string())?;
-            st.active = false;
-            let pts = std::mem::take(&mut st.points);
-            (pts, format!("rec-{}", epoch_secs()))
-        };
-        if points.len() < 2 {
-            return Err("recording too short — no usable movement captured".to_string());
+            if st.active {
+                st.active = false;
+                st.stopped_by = Some("Stop".to_string());
+                finish_movement(&mut st, discard_current);
+            }
         }
-        let info = RecordingInfo {
-            id: id.clone(),
-            points: points.len(),
-            length_px: path_length(&points),
-            created: epoch_secs().to_string(),
-        };
-        let dir = recordings_dir()?;
-        let raw = serde_json::to_string(&points).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join(format!("{}.json", id)), raw).map_err(|e| e.to_string())?;
-        Ok(info)
+        recording_status()
     }
 
     pub fn delete_recording(id: &str) -> Result<(), String> {
@@ -664,7 +952,9 @@ pub async fn click_at(
     {
         let hwnd = site.window().hwnd().map_err(|e| e.to_string())?.0 as isize;
         return crate::run_blocking(move || {
-            win::click_at(x, y, &button, |x, y| check_pointer(&site, &frame, hwnd, x, y))
+            win::click_at(x, y, &button, |x, y| {
+                check_pointer(&site, &frame, hwnd, x, y)
+            })
         })
         .await;
     }
@@ -687,17 +977,54 @@ pub async fn type_text(text: String, wpm: f64) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn start_recording() -> Result<(), String> {
+pub async fn start_recording(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<RecordingStatus, String> {
+    let sidebar = crate::lock_webview(&state.sidebar, "sidebar")?;
     #[cfg(windows)]
-    return win::start_recording();
+    return crate::run_blocking(move || win::start_recording(sidebar)).await;
     #[cfg(not(windows))]
-    Err("recording is only supported on Windows".to_string())
+    {
+        let _ = sidebar;
+        Err("recording is only supported on Windows".to_string())
+    }
 }
 
 #[tauri::command]
-pub async fn stop_recording() -> Result<RecordingInfo, String> {
+pub async fn stop_recording(discard_current: Option<bool>) -> Result<RecordingStatus, String> {
     #[cfg(windows)]
-    return crate::run_blocking(win::stop_recording).await;
+    return crate::run_blocking(move || {
+        win::stop_recording(discard_current.unwrap_or(false))?;
+        let started = std::time::Instant::now();
+        loop {
+            let status = win::recording_status()?;
+            if let Some(error) = &status.error {
+                return Err(error.clone());
+            }
+            if !status.saving {
+                return Ok(status);
+            }
+            if started.elapsed() > std::time::Duration::from_secs(10) {
+                return Err(
+                    "recording stopped but movements are still saving; check recording status"
+                        .to_string(),
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    })
+    .await;
+    #[cfg(not(windows))]
+    {
+        let _ = discard_current;
+        Err("recording is only supported on Windows".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn recording_status() -> Result<RecordingStatus, String> {
+    #[cfg(windows)]
+    return win::recording_status();
     #[cfg(not(windows))]
     Err("recording is only supported on Windows".to_string())
 }

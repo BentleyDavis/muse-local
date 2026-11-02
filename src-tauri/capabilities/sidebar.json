@@ -21,6 +21,7 @@
     "allow-type-text",
     "allow-start-recording",
     "allow-stop-recording",
+    "allow-recording-status",
     "allow-list-recordings",
     "allow-load-recording",
     "allow-delete-recording",

@@ -343,6 +343,7 @@ registerAction("type", async (args, context) => {
 registerAction("screenshot", async () => invoke("screenshot"));
 registerAction("rec_start", async () => invoke("start_recording"));
 registerAction("rec_stop", async () => invoke("stop_recording"));
+registerAction("rec_status", async () => invoke("recording_status"));
 registerAction("recordings", async () => invoke("list_recordings"));
 
 registerAction("sequence", async (args, context, depth) => {

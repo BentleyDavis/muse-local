@@ -89,8 +89,12 @@ The left pane is the app — no JSON editing needed:
   slider (0.25–4.0×). Typing gets per-keystroke variance, longer pauses on
   spaces and sentence ends, and occasional thinking pauses. Mouse speed only
   scales replay tempo — the trajectory is always your transformed recording.
-- **Mouse recordings**: record your real mouse movements (Start/Stop),
-  list them, delete the duds.
+- **Mouse recordings**: **Record movements…** opens a dedicated recording
+  screen with Start, Stop, Done, live pause progress, and a saved-movement
+  count. Saved movements and their Delete controls appear only on that screen,
+  not the main sidebar. Escape stops recording even when focus is in the website.
+  Settings and movements use separate content sections, with one mounted at a
+  time; returning with Done preserves unsaved settings.
 - **Connection test**: sends a `ping` command through Firebase and reports
   the round-trip.
 
@@ -237,7 +241,8 @@ Actions:
 | `cursor` | `{space?}` | current cursor in page and screen coordinates, `insidePage` |
 | `click` | `{selector}` or `{x, y, space?, button?}` | native OS click; resolved target coordinates |
 | `type` | `{text}` | native OS typing at the configured WPM with human variance; `{ok, wpm}` |
-| `rec_start` / `rec_stop` | — | record your mouse; `rec_stop` → `{id, points, lengthPx}` |
+| `rec_start` / `rec_stop` | — | start/stop a segmented recording session; returns recording status |
+| `rec_status` | — | live `{active, saved, discarded, currentPoints, idleMs, pauseMs, saving, inControls, stoppedBy, error}` |
 | `recordings` | — | list saved recordings |
 
 Page scripts, arguments, results, and execution time are bounded. A page
@@ -271,17 +276,43 @@ uncovered on a connected monitor. The app rechecks geometry and target
 visibility before each injected point and before pressing a mouse button;
 if those checks fail, it reports an error instead of continuing at stale
 coordinates. This is not a physical-input lock: your own mouse movement
-is not blocked by this feature. System-wide manual recording remains unchanged.
+is not blocked by this feature. Manual recording captures real movements
+outside the sidebar, including elsewhere on the desktop.
 
 ## Building the movement library
 
-1. Send `rec_start`.
-2. Use the computer naturally for a while — different distances, directions,
-   fast and slow moves. (Recording is system-wide via a low-level mouse hook.)
-3. Send `rec_stop`. The recording lands in
-   `Documents/muse-local/recordings/rec-<epoch>.json`.
-4. Repeat a few times for variety. `mouse` picks randomly from the 3
-   closest-length recordings each time, so repeats never look identical.
+1. In **Mouse recordings**, choose **Record movements…**, then **Start recording**
+   (or send `rec_start`).
+2. Move naturally outside the sidebar: different distances, directions, and
+   speeds. Pauses shorter than **1.5 seconds** stay within the same movement,
+   allowing touchpad finger repositioning. A pause of 1.5 seconds or a mouse
+   button press completes the movement.
+3. Watch the live pause progress, **Movement complete** indicator, and
+   **movements saved this session** count. Completed movements are saved
+   immediately; you do not have to stop the session to keep them.
+4. Press **Escape anywhere** to stop and save the current usable movement.
+   Alternatively use **Stop**, or **Done** to stop and return to settings.
+   Entering the sidebar discards the entire unfinished approach, so the move
+   toward Stop/Done is not saved. Wait for the completion indicator before
+   returning to the sidebar if you want to keep your last intended movement.
+5. Each movement is saved separately in
+   `Documents/muse-local/recordings/rec-<epoch>-<uuid>.json`.
+   Short or degenerate movements (fewer than 3 points, path length under 8
+   pixels, or endpoints less than 4 pixels apart) are discarded and counted.
+   Old recordings remain compatible. `mouse` picks randomly from the 3
+   closest-length recordings.
+
+Only real, non-injected mouse input is recorded. The low-level keyboard hook
+observes Escape for stopping; it does not record typed keys or block the
+Escape event. Recording errors appear on the screen. Failed saves retain the
+movement in memory and retry while the app remains open; do not close the app
+while an error or saving indicator is displayed.
+
+`rec_start` and `rec_stop` now return session status instead of one recording
+file. `rec_stop` saves the current usable movement and waits for pending saves;
+`recordings` lists the resulting files. The UI uses a discard-current option
+for Stop/Done so control-approach movement is excluded. Starting again resets
+the session counters, not the saved movement library.
 
 ## Repo conventions
 
