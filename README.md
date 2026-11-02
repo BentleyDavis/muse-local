@@ -64,6 +64,25 @@ Windows Credential Manager and let the app prompt again).
 `databaseURL`, `node`, and `targetUrl` stay in plaintext `config.json` —
 they're identifiers, not secrets.
 
+## Settings screen
+
+The loader page is a real settings screen — no JSON editing needed:
+
+- **Connection**: Firebase database URL, node, target URL.
+- **Human input**: typing speed slider (15–160 WPM) and mouse replay speed
+  slider (0.25–4.0×). Typing gets per-keystroke variance, longer pauses on
+  spaces and sentence ends, and occasional thinking pauses. Mouse speed only
+  scales replay tempo — the trajectory is always your transformed recording.
+- **Firebase token**: set / replace / delete (Credential Manager).
+
+The ⚙ button on the in-page badge jumps back to settings from any target
+page. Settings are also in `config.json` under `humanInput` if you prefer
+the file:
+
+```json
+"humanInput": { "typingWpm": 55, "mouseSpeed": 1.0 }
+```
+
 ## Config — Documents/muse-local/config.json
 
 ```json
@@ -131,9 +150,9 @@ Actions:
 | `eval` | `{code, args?}` | JSON-safe return value (best-effort; strict-CSP pages reject it) |
 | `snapshot` | — | `{url, title, html}` |
 | `screenshot` | — | `{dataUrl, width, height}` (PNG of the app window) |
-| `mouse` | `{from:{x,y}, to:{x,y}, mirror?}` | replays a transformed recording; `{points, recording, mirrored}` |
+| `mouse` | `{from:{x,y}, to:{x,y}, mirror?}` | replays a transformed recording at the configured mouse speed; `{points, recording, mirrored, speed}` |
 | `click` | `{x, y, button?}` | native OS click |
-| `type` | `{text}` | native OS typing (real key events) |
+| `type` | `{text}` | native OS typing at the configured WPM with human variance; `{ok, wpm}` |
 | `rec_start` / `rec_stop` | — | record your mouse; `rec_stop` → `{id, points, lengthPx}` |
 | `recordings` | — | list saved recordings |
 

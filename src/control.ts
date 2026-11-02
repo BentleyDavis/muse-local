@@ -21,7 +21,18 @@ declare const __TAURI__:
 interface LocalConfig {
   version: number;
   firebase: { databaseURL: string; node: string; token: string };
+  humanInput?: { typingWpm?: number; mouseSpeed?: number };
   targetUrl: string;
+}
+
+let activeConfig: LocalConfig | null = null;
+
+function humanInput(): { typingWpm: number; mouseSpeed: number } {
+  const h = activeConfig?.humanInput ?? {};
+  return {
+    typingWpm: h.typingWpm ?? 55,
+    mouseSpeed: h.mouseSpeed ?? 1.0,
+  };
 }
 
 function invoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -32,23 +43,35 @@ function invoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> 
 // ---------- on-screen status badge ----------
 
 let badge: HTMLElement | null = null;
+let badgeText: HTMLElement | null = null;
 function setBadge(text: string): void {
   if (!badge) {
     badge = document.createElement("div");
     badge.id = "muse-local-badge";
     badge.style.cssText =
       "position:fixed;right:12px;bottom:12px;z-index:2147483647;" +
+      "display:flex;gap:8px;align-items:center;" +
       "background:#1d4ed8;color:#fff;font:12px system-ui,sans-serif;" +
-      "padding:6px 10px;border-radius:8px;opacity:.92;cursor:pointer;user-select:none;";
-    badge.title = "Muse Local — click to ping";
-    badge.addEventListener("click", () => {
+      "padding:6px 10px;border-radius:8px;opacity:.92;user-select:none;";
+    badgeText = document.createElement("span");
+    badgeText.style.cursor = "pointer";
+    badgeText.title = "Muse Local — click to ping";
+    badgeText.addEventListener("click", () => {
       void handleCommand({ id: "badge-ping", action: "ping", token: "" }).then((r) =>
         setBadge(`ok ${String((r as { url?: string }).url ?? "")}`)
       );
     });
+    const gear = document.createElement("span");
+    gear.textContent = "⚙";
+    gear.style.cursor = "pointer";
+    gear.title = "Muse Local settings";
+    gear.addEventListener("click", () => {
+      void invoke("open_settings").catch(() => setBadge("settings unavailable"));
+    });
+    badge.append(badgeText, gear);
     document.documentElement.appendChild(badge);
   }
-  badge.textContent = `Muse v${VERSION} · ${text}`;
+  badgeText!.textContent = `Muse v${VERSION} · ${text}`;
 }
 
 // ---------- DOM helpers (no runtime codegen: strict-CSP safe) ----------
@@ -138,8 +161,9 @@ const handlers: Record<string, (args: Args) => Promise<unknown>> = {
       );
     const points = await invoke<RecPoint[]>("load_recording", { id: rec.id });
     const path = transformTo(points, from, to, args.mirror === true);
-    await invoke("mouse_path", { points: path });
-    return { points: path.length, recording: rec.id, mirrored: args.mirror === true };
+    const speed = humanInput().mouseSpeed;
+    await invoke("mouse_path", { points: path, speed });
+    return { points: path.length, recording: rec.id, mirrored: args.mirror === true, speed };
   },
 
   click: async (args: Args) => {
@@ -152,8 +176,9 @@ const handlers: Record<string, (args: Args) => Promise<unknown>> = {
   },
 
   type: async (args: Args) => {
-    await invoke("type_text", { text: String(args.text ?? "") });
-    return { ok: true };
+    const wpm = humanInput().typingWpm;
+    await invoke("type_text", { text: String(args.text ?? ""), wpm });
+    return { ok: true, wpm };
   },
 
   rec_start: async () => invoke("start_recording"),
@@ -186,6 +211,7 @@ async function boot(): Promise<void> {
     setBadge("config error");
     return;
   }
+  activeConfig = cfg;
   const fb = cfg?.firebase;
   if (!fb?.databaseURL || !fb.token || /[^A-Za-z0-9]/.test(fb.token)) {
     setBadge("config needed");

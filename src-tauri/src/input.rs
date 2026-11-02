@@ -104,11 +104,15 @@ mod win {
         })
     }
 
-    pub fn mouse_path(points: &[TimedPoint]) -> Result<(), String> {
+    pub fn mouse_path(points: &[TimedPoint], speed: f64) -> Result<(), String> {
+        // speed multiplies replay tempo: 1.0 = as recorded, 2.0 = twice as
+        // fast. The trajectory itself is untouched — only the timing scales.
+        let speed = speed.clamp(0.25, 4.0);
         for p in points {
             mouse_move_abs(p.x, p.y)?;
-            if p.dt_ms > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(p.dt_ms.min(2000)));
+            let dt = ((p.dt_ms as f64) / speed).round() as u64;
+            if dt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(dt.min(2000)));
             }
         }
         Ok(())
@@ -123,39 +127,85 @@ mod win {
         Ok(())
     }
 
-    pub fn type_text(text: &str) -> Result<(), String> {
-        // Each UTF-16 unit goes out as a KEYEVENTF_UNICODE keypress, so the
-        // target app receives genuine key events (works in password fields,
-        // chat boxes, and anywhere synthetic DOM events are distrusted).
-        for scan in text.encode_utf16() {
-            for key_up in [false, true] {
-                let ki = KEYBDINPUT {
-                    wVk: 0,
-                    wScan: scan,
-                    dwFlags: if key_up {
-                        KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-                    } else {
-                        KEYEVENTF_UNICODE
-                    },
-                    time: 0,
-                    dwExtraInfo: 0,
-                };
-                let input = INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 { ki },
-                };
-                let sent = unsafe {
-                    SendInput(
-                        1,
-                        &input as *const INPUT,
-                        std::mem::size_of::<INPUT>() as i32,
-                    )
-                };
-                if sent != 1 {
-                    return Err("SendInput (keyboard) failed".to_string());
-                }
+    /// Dependency-free xorshift64* — good enough for humanizing timing.
+    struct Lcg(u64);
+    impl Lcg {
+        fn new() -> Self {
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9E3779B97F4A7C15)
+                | 1;
+            Lcg(seed)
+        }
+        fn next_f64(&mut self) -> f64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            ((x.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64) / (u64::MAX as f64)
+        }
+    }
+
+    fn key_press(scan: u16) -> Result<(), String> {
+        for key_up in [false, true] {
+            let ki = KEYBDINPUT {
+                wVk: 0,
+                wScan: scan,
+                dwFlags: if key_up {
+                    KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+                } else {
+                    KEYEVENTF_UNICODE
+                },
+                time: 0,
+                dwExtraInfo: 0,
+            };
+            let input = INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 { ki },
+            };
+            let sent = unsafe {
+                SendInput(
+                    1,
+                    &input as *const INPUT,
+                    std::mem::size_of::<INPUT>() as i32,
+                )
+            };
+            if sent != 1 {
+                return Err("SendInput (keyboard) failed".to_string());
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
+    pub fn type_text(text: &str, wpm: f64) -> Result<(), String> {
+        // Human typing: base rate from WPM with per-keystroke variance,
+        // slightly longer on spaces and sentence-ending punctuation, and an
+        // occasional "thinking pause". Each char is still a genuine
+        // KEYEVENTF_UNICODE keypress, so it works in password fields and
+        // anywhere synthetic DOM events are distrusted.
+        let wpm = wpm.clamp(15.0, 160.0);
+        let base_ms = 12000.0 / wpm; // ~5 chars per word
+        let mut rng = Lcg::new();
+        let mut buf = [0u16; 2];
+        for ch in text.chars() {
+            for &scan in ch.encode_utf16(&mut buf) {
+                key_press(scan)?;
+            }
+            let mut delay = base_ms * (0.6 + rng.next_f64() * 0.8);
+            if ch == ' ' {
+                delay += 40.0;
+            }
+            if ".!?".contains(ch) {
+                delay += 250.0 + rng.next_f64() * 350.0;
+            }
+            if rng.next_f64() < 0.04 {
+                delay += 400.0 + rng.next_f64() * 800.0;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(
+                delay.round().max(1.0) as u64,
+            ));
         }
         Ok(())
     }
@@ -325,12 +375,12 @@ mod win {
 // ---------- Tauri commands ----------
 
 #[tauri::command]
-pub fn mouse_path(points: Vec<TimedPoint>) -> Result<(), String> {
+pub fn mouse_path(points: Vec<TimedPoint>, speed: f64) -> Result<(), String> {
     #[cfg(windows)]
-    return win::mouse_path(&points);
+    return win::mouse_path(&points, speed);
     #[cfg(not(windows))]
     {
-        let _ = &points;
+        let _ = (&points, &speed);
         Err("mouse_path is only supported on Windows".to_string())
     }
 }
@@ -347,12 +397,12 @@ pub fn click_at(x: i32, y: i32, button: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn type_text(text: String) -> Result<(), String> {
+pub fn type_text(text: String, wpm: f64) -> Result<(), String> {
     #[cfg(windows)]
-    return win::type_text(&text);
+    return win::type_text(&text, wpm);
     #[cfg(not(windows))]
     {
-        let _ = &text;
+        let _ = (&text, &wpm);
         Err("type_text is only supported on Windows".to_string())
     }
 }
