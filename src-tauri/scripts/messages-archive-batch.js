@@ -111,9 +111,21 @@ if (!ready) throw new Error("Messages conversation list did not load.");
 // Start at the top (list is newest-first); no initial scroll.
 
 let archived = 0;
+const archivedAddrs = [];
 const failed = [];
 const t0 = Date.now();
 const TIME_CAP = 90 * 60 * 1000;
+
+async function progressSnapshot(reason) {
+  await muse.log(`PROGRESS [${reason}]: ` + JSON.stringify({
+    archivedCount: archived,
+    remainingCount: remaining.size,
+    failedCount: failed.length,
+    archivedAddresses: archivedAddrs,
+    remainingAddresses: [...remaining].map((d) => targetToAddr.get(d)),
+    failedAddresses: failed,
+  }));
+}
 
 while (remaining.size > 0 && Date.now() - t0 < TIME_CAP) {
   // Scan the visible HTML for ANY matching numbers.
@@ -144,8 +156,9 @@ while (remaining.size > 0 && Date.now() - t0 < TIME_CAP) {
       try {
         await archiveOne(match, pageUrl);
         archived++;
+        archivedAddrs.push(addr);
         remaining.delete(match.digits);
-        if (archived % 25 === 0) await muse.log(`Archived ${archived}; ${remaining.size} patterns left.`);
+        if (archived % 25 === 0) await progressSnapshot(`${archived} archived`);
       } catch (e) {
         const n = (failCount.get(match.digits) || 0) + 1;
         failCount.set(match.digits, n);
