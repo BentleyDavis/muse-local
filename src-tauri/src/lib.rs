@@ -370,6 +370,7 @@ pub fn run() {
             let window = tauri::window::WindowBuilder::new(app, "main")
                 .title("Muse Local")
                 .inner_size(1440.0, 900.0)
+                .maximized(true)
                 .build()?;
             let size = window.inner_size()?;
             let initial_w = clamped_sidebar_width(initial_w, size.width);
