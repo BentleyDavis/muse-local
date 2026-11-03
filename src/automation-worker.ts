@@ -40,6 +40,7 @@ const muse = Object.freeze({
     }),
   moveTo: (args: unknown) => request("move_to", args),
   click: (args: unknown) => request("click", args),
+  scroll: (ticks: number) => request("scroll", { ticks }),
   type: (text: string) => request("type", { text }),
   dom: (args: unknown) => request("dom", args),
   waitFor: (args: unknown) => request("wait_for", args),
@@ -47,6 +48,7 @@ const muse = Object.freeze({
   screenshot: () => request("screenshot"),
   wait: (ms: number) => request("wait", { ms }),
   log: (value: unknown) => request("log", { value }),
+  confirm: (message: string) => request("confirm", { message }),
 });
 
 self.addEventListener("message", async (event: MessageEvent<StartMessage | ReplyMessage>) => {

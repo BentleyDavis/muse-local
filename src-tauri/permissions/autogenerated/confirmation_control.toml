@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-confirmation-control"
+description = "Enables the confirmation_control command without any pre-configured scope."
+commands.allow = ["confirmation_control"]
+
+[[permission]]
+identifier = "deny-confirmation-control"
+description = "Denies the confirmation_control command without any pre-configured scope."
+commands.deny = ["confirmation_control"]

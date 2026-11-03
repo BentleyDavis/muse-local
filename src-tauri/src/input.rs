@@ -258,6 +258,25 @@ mod win {
         ))
     }
 
+    pub fn scroll_wheel(
+        ticks: i32,
+        mut validate: impl FnMut(i32, i32) -> Result<(), String>,
+    ) -> Result<(), String> {
+        for _ in 0..ticks.unsigned_abs() {
+            wait_native()?;
+            let cursor = cursor_position()?;
+            validate(cursor.x, cursor.y)?;
+            send_mouse(MOUSEINPUT {
+                dx: 0, dy: 0,
+                mouseData: (ticks.signum() * 120) as u32,
+                dwFlags: MOUSEEVENTF_WHEEL,
+                time: 0, dwExtraInfo: INPUT_MARKER,
+            })?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Ok(())
+    }
+
     fn send_mouse(mi: MOUSEINPUT) -> Result<(), String> {
         let input = INPUT {
             r#type: INPUT_MOUSE,
@@ -604,6 +623,9 @@ mod win {
                 return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
             }
             let down = matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+            if crate::input_lock::confirmation_key(info.vkCode, down) {
+                return 1;
+            }
             if info.vkCode == u32::from(VK_LWIN) || info.vkCode == u32::from(VK_RWIN) {
                 WINDOWS_DOWN.store(down, Ordering::SeqCst);
             }
@@ -621,6 +643,7 @@ mod win {
             }
             if info.vkCode == u32::from(VK_ESCAPE) {
                 if down && !ESCAPE_DOWN.swap(true, Ordering::SeqCst) {
+                    crate::input_lock::cancel_confirmation();
                     WINDOWS_DOWN.store(false, Ordering::SeqCst);
                     let mut handled = crate::input_lock::locked();
                     crate::input_lock::unlock();
@@ -1039,6 +1062,31 @@ pub async fn mouse_path(
     {
         let _ = (&points, &speed, &frame, &site);
         Err("mouse_path is only supported on Windows".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn scroll_wheel(
+    state: tauri::State<'_, crate::AppState>,
+    ticks: i32,
+    frame: PointerFrame,
+) -> Result<(), String> {
+    if ticks == 0 || ticks.unsigned_abs() > 20 {
+        return Err("wheel ticks must be nonzero and between -20 and 20".into());
+    }
+    let site = crate::lock_webview(&state.site, "site")?;
+    #[cfg(windows)]
+    {
+        let hwnd = site.window().hwnd().map_err(|e| e.to_string())?.0 as isize;
+        return crate::run_blocking(move || {
+            win::set_automation_window(hwnd)?;
+            win::scroll_wheel(ticks, |x, y| check_pointer(&site, &frame, hwnd, x, y))
+        }).await;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (site, frame);
+        Err("scroll_wheel is only supported on Windows".into())
     }
 }
 

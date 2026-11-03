@@ -81,11 +81,12 @@ Keep `run` for page-only snippets; it has not changed meaning.
 ### Local scripts folder and buttons
 
 The sidebar's **Local automation scripts** section displays the actual folder,
-normally `Documents/muse-local/scripts`. It creates that folder and installs
-[messages-read.js](../src-tauri/scripts/messages-read.js) when the folder is
-first created. Existing files are never overwritten by refreshing or restarting.
-Edit the installed copy to customize it; repo sample edits do not automatically
-replace a user's installed copy.
+the repository's `src-tauri/scripts` directory. Scripts are read directly
+from that folder on every run, including
+[messages-read.js](../src-tauri/scripts/messages-read.js).
+There is no Documents copy or automatic script installation. The native build
+records the repository folder location; an installed executable still requires
+that repository directory to exist. Moving the repository requires rebuilding.
 
 Create a UTF-8 `.js` file directly in that folder, then click **Refresh**.
 Names must use ASCII letters, digits, hyphens, and underscores before `.js`
@@ -109,6 +110,8 @@ Nothing automatically runs on restart. Results appear below the local script
 buttons and logs appear in the sidebar console. Local runs share execution
 ordering with Firebase commands, but do not create Firebase history records.
 The file is read when its queued run begins, so edits before that time apply.
+The console and log file record the queued/starting filename, each app action's
+start/completion/failure, and explicit waits. Countdown ticks remain display-only.
 Buttons are disabled while a local run is queued or another script is active.
 
 An AI can also request a file from that same folder through Firebase:
@@ -136,6 +139,7 @@ even if a script issues them concurrently.
 | `muse.page(functionOrBody, args?)` | Run an async function or string body in the website and return its value |
 | `muse.moveTo({selector})` or `muse.moveTo({to:{x,y}, ...})` | Existing native `move_to`, including recordings, bounds, pace and pause |
 | `muse.click(args)` | Existing native click |
+| `muse.scroll(ticks)` | Native mouse wheel at the current pointer; negative scrolls down, positive up, 1-20 notches |
 | `muse.type(text)` | Type into the focused element |
 | `muse.dom(args)` | Existing DOM action |
 | `muse.waitFor(args)` | Existing selector wait |
@@ -143,6 +147,7 @@ even if a script issues them concurrently.
 | `muse.screenshot()` | Capture app window |
 | `muse.wait(ms)` | Wait 0-60,000 milliseconds without page execution |
 | `muse.log(value)` | Write a JSON-compatible value to the local console |
+| `muse.confirm(message)` | Keep input locked and request approval; Y approves, N or Escape cancels |
 | `muse.action(name, args?)` | Other allowed built-ins: `snapshot`, `ping`, `recordings`, and the actions above (`run`, `move_to`, `wait_for`, etc.) |
 
 `muse.page` serializes a supplied function: it cannot capture variables from
@@ -210,6 +215,69 @@ It checks document readiness, visible busy/progress indicators and loading
 status text before accepting rows, and logs loading/readiness state changes.
 It demonstrates navigation, page calls, a loop/condition, waits, recorded
 movement, clicks, and return data.
+
+The [batch archive script](../src-tauri/scripts/messages-archive-batch.js)
+matches only complete email addresses or phone/short-code headings against its
+embedded target list. Email matching is case-insensitive; US phone formatting
+and an optional leading country code are normalized. Empty headings and contact
+names are never targets. It rechecks identity before clicks, rescans after each
+archive, and stops on uncertain archive outcomes.
+
+The [old unpinned archive script](../src-tauri/scripts/messages-archive-old-unpinned.js)
+uses only list-card timestamps, never opens conversations, and requires explicit
+`data-e2e-is-pinned="false"` with no Pinned icon. It archives cards with a
+three-letter English month date (such as `Jan 13`, optionally with a year) or a
+US numeric `M/D/YY` date, regardless of age. Other date labels and unknown pin
+status are logged and skipped. This replaces the original six-month cutoff;
+the existing filename is retained.
+It calibrates native wheel movement with one notch, then targets half the visible
+list per scroll (up to six notches), preserving overlap. It asks Y/N before
+each of the first five archives per run, while hovering over Archive, then
+continues automatically. N stops the script. Changed identity, pin status, or date stops the
+script; uncertain archive results are never retried automatically.
+Before opening options for each target, rows below the upper third are moved up
+using native wheel input with identity rechecks; rows already higher are not
+moved down. At actual list boundaries, coverage checks still prevent clicking a
+covered target. Covered or animating pointer targets are rechecked once per
+second for up to ten seconds before stopping.
+At an apparent loaded bottom it uses measured native wheel input to scroll up
+one visible screen, then back down to the previously reached bottom, followed
+by a wheel nudge to trigger lazy loading. It does not chase a newly extended
+bottom past unscanned rows. Recovery is bounded and fails explicitly if the
+wheel does not reach its target. It then polls every second. Added conversations or changed scroll bounds
+resume scanning immediately. Completion requires thirty consecutive checks
+without visible loading or list changes. Spinner checks include `mws-spinner`
+and its descendants, testing viewport clipping and computed visibility, display,
+and opacity through their ancestors; hidden spinner markup alone is not loading.
+Visible loading resets the idle count. After two minutes without reaching a
+settled state, the script fails explicitly as incomplete rather than reporting
+the end of the list. Loading transitions and visible indicator tags/classes are
+logged for diagnosis.
+
+The batch currently requires confirmation before each Archive click. The
+script opens the row's menu and hovers over Archive while keeping input locked.
+The sidebar shows the exact heading and Archive/Cancel buttons.
+While this prompt is pending, global Y approves and N cancels, without moving
+the mouse away from Archive. The keys are consumed and not sent to the website.
+Confirmation does not require focus or move the pointer or keyboard focus.
+Escape unlocks input and cancels the pending confirmation. Native Escape and
+Y/N handling is global, not dependent on which webview has keyboard focus.
+Confirmation responses are awaited in native code, not a sidebar polling
+timer. A separate Windows hotkey thread backs up Escape and confirmation keys.
+Failure to register safety hotkeys disables automation and unlocks input.
+Y/N and Escape work regardless of which application has focus. Approval still
+requires locked input; native mouse actions retain their foreground-window
+safety checks.
+The script rechecks the row before clicking. Cancel
+stops the batch without approving that archive.
+Batch scrolling moves the pointer into the conversation-list scroll area and
+uses native wheel input. Page scripts inspect scroll positions but never set
+them. Failure to advance before the measured bottom fails the incomplete
+search instead of reporting all remaining conversations as not found.
+Batch scans exclude rows clipped outside the viewport or a scroll ancestor.
+Diagnostic logs include visible address headings, their normalized keys, and
+whether each key is in the remaining target list. Named-contact-only viewports
+are skipped normally rather than treated as extraction failures.
 
 ### Example: navigate and inspect a page
 
@@ -561,6 +629,7 @@ finishes in the shared queue.
 | `move_to` / `mouse` | `{selector}` or `{to:{x,y}, from?, space?, mirror?}` | transformed recording; resolved `from`/`to` in page and screen coordinates, plus recording/speed |
 | `cursor` | `{space?}` | current cursor in page and screen coordinates, `insidePage` |
 | `click` | `{selector, button?}` or `{x, y, space?, button?}`; button defaults to `left`, also `right` or `middle` | `{ok, to:{page,screen}}` |
+| `scroll` | `{ticks}`: nonzero integer from -20 to 20, negative down | `{ok,ticks}`; native wheel, pointer must be inside the target pane |
 | `type` | `{text}` | native OS typing at the configured WPM with human variance; `{ok, wpm}` |
 | `rec_start` / `rec_stop` | — | start/stop a segmented recording session; returns recording status |
 | `rec_status` | — | live `{active, saved, discarded, currentPoints, idleMs, pauseMs, saving, inControls, stoppedBy, error}` |

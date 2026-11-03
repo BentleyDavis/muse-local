@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-scroll-wheel"
+description = "Enables the scroll_wheel command without any pre-configured scope."
+commands.allow = ["scroll_wheel"]
+
+[[permission]]
+identifier = "deny-scroll-wheel"
+description = "Denies the scroll_wheel command without any pre-configured scope."
+commands.deny = ["scroll_wheel"]

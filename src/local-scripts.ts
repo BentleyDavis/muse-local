@@ -14,7 +14,7 @@ export function createLocalScripts(
 ): HTMLElement {
   const panel = section("Local automation scripts");
   const folder = el("p", "Loading scripts folder...", "font-size:12px;word-break:break-all;");
-  const hint = el("p", "Add .js files here, then Refresh. Input locks while a script runs and unlocks afterward. Escape pauses until you resume. Stop prevents new actions; an action already dispatched may finish.", "font-size:12px;color:#9aa3b2;");
+  const hint = el("p", "Scripts run directly from this repository folder. Add or edit .js files here, then Refresh. Input locks while a script runs and unlocks afterward. Escape pauses until you resume. Stop prevents new actions; an action already dispatched may finish.", "font-size:12px;color:#9aa3b2;");
   const status = el("p", "", "font-size:12px;white-space:pre-wrap;");
   status.setAttribute("role", "status");
   const output = el("pre", "", "font-size:11px;white-space:pre-wrap;max-height:240px;overflow:auto;");

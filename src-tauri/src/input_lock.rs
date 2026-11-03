@@ -9,6 +9,150 @@ static CONTROL: AtomicU64 = AtomicU64::new(0);
 static READY: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static PAUSED: AtomicBool = AtomicBool::new(false);
+static CONFIRMATION: AtomicU64 = AtomicU64::new(0);
+static CONFIRMATION_KEY: AtomicU64 = AtomicU64::new(0);
+
+pub fn confirmation_key(key: u32, down: bool) -> bool {
+    if !down && CONFIRMATION_KEY.load(Ordering::SeqCst) == u64::from(key) {
+        CONFIRMATION_KEY.store(0, Ordering::SeqCst);
+        return true;
+    }
+    if down && CONFIRMATION_KEY.load(Ordering::SeqCst) == u64::from(key) {
+        return true;
+    }
+    let response = match key {
+        0x59 => 2, // Y
+        0x4e => 3, // N
+        _ => return false,
+    };
+    if down
+        && CONFIRMATION
+            .compare_exchange(1, response, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
+        CONFIRMATION_KEY.store(u64::from(key), Ordering::SeqCst);
+        return true;
+    }
+    false
+}
+
+pub fn cancel_confirmation() {
+    let _ = CONFIRMATION.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |state| {
+        if state == 1 || state == 2 {
+            Some(4)
+        } else {
+            None
+        }
+    });
+}
+
+#[tauri::command]
+pub async fn wait_confirmation() -> Result<u64, String> {
+    loop {
+        if !ready() {
+            return Err("input protection unavailable; confirmation cancelled".into());
+        }
+        let response = CONFIRMATION.load(Ordering::SeqCst);
+        if response != 1 {
+            if response == 2 && !locked() {
+                return Err("Approval cancelled: input was unlocked".into());
+            }
+            return Ok(response);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(windows)]
+fn start_safety_hotkeys() {
+    std::thread::spawn(|| unsafe {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            PeekMessageW, MSG, PM_REMOVE, WM_HOTKEY,
+        };
+        let mut escape_registered = false;
+        let mut confirmation_registered = false;
+        loop {
+            let active = ACTIVE.load(Ordering::SeqCst);
+            let pending = CONFIRMATION.load(Ordering::SeqCst) == 1;
+            if active != escape_registered {
+                if active {
+                    if RegisterHotKey(std::ptr::null_mut(), 1, MOD_NOREPEAT, 0x1b) == 0 {
+                        fail("Cannot register emergency Escape hotkey; automation disabled".into());
+                        return;
+                    }
+                } else {
+                    UnregisterHotKey(std::ptr::null_mut(), 1);
+                }
+                escape_registered = active;
+            }
+            if pending != confirmation_registered {
+                if pending {
+                    if RegisterHotKey(std::ptr::null_mut(), 2, MOD_NOREPEAT, 0x59) == 0
+                        || RegisterHotKey(std::ptr::null_mut(), 3, MOD_NOREPEAT, 0x4e) == 0
+                    {
+                        UnregisterHotKey(std::ptr::null_mut(), 1);
+                        UnregisterHotKey(std::ptr::null_mut(), 2);
+                        UnregisterHotKey(std::ptr::null_mut(), 3);
+                        fail(
+                            "Cannot register confirmation Y/N hotkeys; automation disabled".into(),
+                        );
+                        return;
+                    }
+                } else {
+                    UnregisterHotKey(std::ptr::null_mut(), 2);
+                    UnregisterHotKey(std::ptr::null_mut(), 3);
+                }
+                confirmation_registered = pending;
+            }
+            let mut message: MSG = std::mem::zeroed();
+            while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                if message.message == WM_HOTKEY {
+                    match message.wParam {
+                        1 => unlock(),
+                        2 => {
+                            let _ = CONFIRMATION.compare_exchange(
+                                1,
+                                2,
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                            );
+                        }
+                        3 => {
+                            let _ = CONFIRMATION.compare_exchange(
+                                1,
+                                3,
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    });
+}
+
+#[tauri::command]
+pub fn confirmation_control(pending: Option<bool>) -> Result<u64, String> {
+    if let Some(pending) = pending {
+        if pending && !ready() {
+            return Err("input hooks unavailable; confirmation keys cannot be used".into());
+        }
+        if pending && !locked() {
+            return Err("Input is unlocked; confirmation not armed".into());
+        }
+        CONFIRMATION.store(if pending { 1 } else { 0 }, Ordering::SeqCst);
+        if pending && !locked() {
+            cancel_confirmation();
+        }
+    }
+    Ok(CONFIRMATION.load(Ordering::SeqCst))
+}
 static ERROR: Mutex<Option<String>> = Mutex::new(None);
 static ACTIVITY: Mutex<(String, usize)> = Mutex::new((String::new(), 0));
 
@@ -31,6 +175,7 @@ pub fn ready() -> bool {
 }
 
 pub fn unlock() {
+    cancel_confirmation();
     if ACTIVE.load(Ordering::SeqCst) || locked() {
         PAUSED.store(true, Ordering::SeqCst);
     }
@@ -51,6 +196,8 @@ pub fn fail(message: String) {
 pub fn initialize() -> Result<(), String> {
     crate::input::initialize_hooks()?;
     READY.store(true, Ordering::SeqCst);
+    #[cfg(windows)]
+    start_safety_hotkeys();
     Ok(())
 }
 

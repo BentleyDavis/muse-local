@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wait-confirmation"
+description = "Enables the wait_confirmation command without any pre-configured scope."
+commands.allow = ["wait_confirmation"]
+
+[[permission]]
+identifier = "deny-wait-confirmation"
+description = "Denies the wait_confirmation command without any pre-configured scope."
+commands.deny = ["wait_confirmation"]

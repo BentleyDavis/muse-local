@@ -12,7 +12,7 @@ type WorkerMessage =
 
 const ALLOWED = new Set([
   "navigate", "run", "dom", "snapshot", "ping", "wait_for", "screenshot",
-  "move_to", "mouse", "cursor", "click", "type", "recordings",
+  "move_to", "mouse", "cursor", "click", "type", "recordings", "scroll",
 ]);
 
 export class AutomationRunner {
@@ -20,7 +20,11 @@ export class AutomationRunner {
   private listeners = new Set<StatusListener>();
   private status = "No automation script running.";
 
-  constructor(private dispatch: Dispatch, private log: (text: string) => void) {}
+  constructor(
+    private dispatch: Dispatch,
+    private log: (text: string) => void,
+    private confirm: (message: string, signal: AbortSignal) => Promise<void>,
+  ) {}
 
   onStatus(listener: StatusListener): void {
     this.listeners.add(listener);
@@ -78,7 +82,17 @@ export class AutomationRunner {
                 throw new Error("automation action arguments exceed the limit");
               }
               let value: unknown;
-              if (action === "log") {
+              if (action === "confirm") {
+                if (!args || typeof args !== "object" || !("message" in args) ||
+                    typeof args.message !== "string" || args.message.length > 2000) {
+                  throw new Error("confirmation requires a message no longer than 2000 characters");
+                }
+                this.update("Waiting for confirmation — locked; Y approve / N cancel / Escape unlock");
+                this.log(`Confirmation requested: ${args.message}`);
+                await this.confirm(args.message, controller.signal);
+                this.log("Confirmation approved.");
+                value = null;
+              } else if (action === "log") {
                 if (!args || typeof args !== "object" || !("value" in args)) {
                   throw new Error("log requires a value");
                 }
@@ -90,16 +104,20 @@ export class AutomationRunner {
                   throw new Error("muse.wait requires milliseconds between 0 and 60000");
                 }
                 const ms = args.ms;
+                this.log(`Waiting ${(ms / 1000).toFixed(1)} s until next script step`);
                 await waitWithCountdown(ms, "until next script step", text => this.update(text), controller.signal);
                 if (!controller.signal.aborted) this.update("Running automation script");
                 value = null;
               } else {
                 if (!ALLOWED.has(action)) throw new Error(`action not available to automation scripts: ${action}`);
+                this.log(`Starting action: ${action}`);
                 this.update(`Running: ${action}`);
                 value = await this.dispatch(action, args, controller.signal, text => this.update(text));
+                this.log(`Completed action: ${action}`);
               }
               if (!controller.signal.aborted) worker.postMessage({ type: "reply", id: message.id, ok: true, value });
             } catch (error) {
+              this.log(`Action failed: ${message.action}: ${String(error)}`);
               if (!controller.signal.aborted) {
                 worker.postMessage({ type: "reply", id: message.id, ok: false, error: String(error) });
               }

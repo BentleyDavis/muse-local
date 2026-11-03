@@ -11,16 +11,7 @@ pub struct ScriptLibrary {
 }
 
 fn scripts_dir() -> Result<PathBuf, String> {
-    let dir = crate::config::app_dir().join("scripts");
-    let first_run = !dir.exists();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create scripts folder: {e}"))?;
-    if first_run {
-        std::fs::write(
-            dir.join("messages-read.js"),
-            include_str!("../scripts/messages-read.js"),
-        )
-        .map_err(|e| format!("cannot install Messages sample: {e}"))?;
-    }
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
     dir.canonicalize()
         .map_err(|e| format!("cannot resolve scripts folder: {e}"))
 }

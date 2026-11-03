@@ -360,6 +360,17 @@ registerAction("type", async (args, context) => {
   return { ok: true, wpm };
 });
 
+registerAction("scroll", async (args, context) => {
+  if (typeof args.ticks !== "number" || !Number.isInteger(args.ticks) ||
+      args.ticks === 0 || Math.abs(args.ticks) > 20) {
+    throw new Error("scroll ticks must be an integer between -20 and 20, excluding zero");
+  }
+  const geometry = await invoke<PointerGeometry>("pointer_geometry");
+  context.signal?.throwIfAborted();
+  await invoke("scroll_wheel", { ticks: args.ticks, frame: geometry.frame });
+  return { ok: true, ticks: args.ticks };
+});
+
 registerAction("screenshot", async () => invoke("screenshot"));
 registerAction("rec_start", async () => invoke("start_recording"));
 registerAction("rec_stop", async () => invoke("stop_recording"));

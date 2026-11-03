@@ -213,6 +213,57 @@ let queueList: HTMLElement | null = null;
 let latestQueueEntries: QueueEntry[] = [];
 let automationActivity = "";
 let actionProgress: HTMLElement | null = null;
+let confirmationPanel: HTMLElement | null = null;
+
+async function confirmAutomation(message: string, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  if (!confirmationPanel) throw new Error("Confirmation panel is unavailable.");
+  const initialProtection = await invoke<{ locked: boolean }>("input_lock_status");
+  if (!initialProtection.locked) throw new Error("Input is unlocked; confirmation cancelled.");
+  signal.throwIfAborted();
+  const panel = confirmationPanel;
+  await invoke("confirmation_control", { pending: true });
+  try {
+  await new Promise<void>((resolve, reject) => {
+    const text = el("p", `${message}\nPress Y to approve or N to cancel without moving the mouse.`, "font-size:13px;white-space:pre-wrap;");
+    const approve = button("Archive (Y)", true);
+    const cancel = button("Cancel / stop batch (N)");
+    let finished = false;
+    const cleanup = () => {
+      finished = true;
+      signal.removeEventListener("abort", abort);
+      panel.replaceChildren();
+    };
+    const abort = () => {
+      cleanup();
+      reject(new Error("Confirmation cancelled; no archive approved."));
+    };
+    const accept = () => { if (!finished) { cleanup(); resolve(); } };
+    void invoke<number>("wait_confirmation").then(response => {
+        if (finished) return;
+        if (response === 2) accept();
+        else automationRunner.stop();
+      }).catch(error => {
+        if (!finished) { cleanup(); reject(error); }
+      });
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) { abort(); return; }
+    approve.addEventListener("click", accept, { once: true });
+    cancel.addEventListener("click", () => {
+      automationRunner.stop();
+    }, { once: true });
+    panel.replaceChildren(text, approve, cancel);
+  });
+  } finally {
+    await invoke("confirmation_control", { pending: false });
+  }
+  signal.throwIfAborted();
+  const protection = await invoke<{ locked: boolean }>("input_lock_status");
+  if (!protection.locked) {
+    throw new Error("Input was unlocked during confirmation; archive cancelled.");
+  }
+  signal.throwIfAborted();
+}
 
 function showActionProgress(text: string): void {
   automationActivity = text;
@@ -290,16 +341,19 @@ const actionContext: ActionContext = {
 const automationRunner = new AutomationRunner(
   (action, args, signal, onProgress) => executeAction(action, args, { ...actionContext, signal, onProgress }),
   (text) => appendLog("script", "info", text),
+  confirmAutomation,
 );
 automationRunner.onStatus((status, active) => {
   showActionProgress(active ? status : "");
 });
 
 async function runLocalScript(name: string): Promise<unknown> {
+  appendLog("script", "info", `Queued local script: ${name}`);
   return new Promise((resolve, reject) => {
     commandQueue.enqueue(`local:${crypto.randomUUID()}`, async () => {
       try {
         const script = await invoke<string>("load_script", { name });
+        appendLog("script", "info", `Starting repository script: ${name}`);
         resolve(await withInputProtection(() => automationRunner.run(script)));
       } catch (error) {
         reject(error);
@@ -657,8 +711,11 @@ async function render() {
   actionProgress = el("p", automationActivity, "font-size:12px;margin:6px 0 0;font-variant-numeric:tabular-nums;");
   actionProgress.setAttribute("role", "status");
   inputPanel.append(actionProgress);
+  confirmationPanel = el("section", "", "flex:none;padding:0 14px;background:#292319;");
+  confirmationPanel.setAttribute("aria-label", "Automation confirmation");
   document.body.append(
     inputPanel,
+    confirmationPanel,
     content,
     buildConsole()
   );
