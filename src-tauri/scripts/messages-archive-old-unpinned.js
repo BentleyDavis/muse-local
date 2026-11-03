@@ -62,15 +62,21 @@ function visible(element) {
 const sources = { read: readCard.toString(), matches: matchesCardDate.toString(), visible: visible.toString() };
 const archived = [];
 const skipped = new Map();
-await muse.navigate("https://messages.google.com/web/conversations");
 const url = "https://messages.google.com/web/conversations";
-await muse.log("Archive unpinned cards with three-letter month dates or M/D/YY dates, regardless of age. Confirmation required for the first five archives this run; automatic afterward.");
-const loadDeadline = Date.now() + 60000;
-while (!await muse.page(() => document.readyState === "complete" &&
-  Boolean(document.querySelector("mws-conversation-list-item")))) {
-  if (Date.now() >= loadDeadline) throw new Error("Conversation list did not load within 60 seconds.");
-  await muse.wait(1000);
+async function loadList() {
+  await muse.page(() => { window.__musePreviousLoad = true; }).catch(() => {});
+  await muse.navigate(url);
+  const loadDeadline = Date.now() + 60000;
+  while (!await muse.page(() => !window.__musePreviousLoad && document.readyState === "complete" &&
+    Boolean(document.querySelector("mws-conversation-list-item")))) {
+    if (Date.now() >= loadDeadline) throw new Error("Conversation list did not load within 60 seconds after page load.");
+    await muse.wait(1000);
+  }
 }
+await muse.log("Archive unpinned cards with three-letter month dates or M/D/YY dates, regardless of age. Confirmation required for the first five archives this run; automatic afterward.");
+await loadList();
+let refreshedPass = false;
+let archivedAtRefresh = 0;
 
 async function validate(match) {
   await muse.page(({ match, sources, url }) => {
@@ -158,8 +164,8 @@ while (true) {
     const match = scan.match;
     if (archived.includes(match.href)) throw new Error("Previously archived conversation reappeared; stopping.");
     await validate(match);
-    for (let attempt = 0; attempt < 24; attempt++) {
-      const position = await muse.page(({ marker }) => {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const position = await muse.page(({ marker, pixelsPerNotch }) => {
         const row = document.querySelector(`[data-muse-old="${marker}"]`);
         if (!row) throw new Error("Conversation disappeared while positioning.");
         let container = row.parentElement;
@@ -171,23 +177,27 @@ while (true) {
         const left = Math.max(0, bounds.left), right = Math.min(innerWidth, bounds.right);
         if (top >= bottom || left >= right) throw new Error("List not visible while positioning.");
         const center = (rect.top + rect.bottom) / 2;
-        const height = bottom - top;
-        const direction = center > top + height / 3 ? -1 : 0;
-        return { direction,
+        const middle = Math.max(top, Math.min(bottom, innerHeight / 2));
+        const offset = center - middle;
+        const tolerance = Math.max(rect.height / 2, 40, (pixelsPerNotch || 0) / 2 + 2);
+        const direction = Math.abs(offset) <= tolerance ? 0 : offset > 0 ? -1 : 1;
+        return { direction, offset,
           blocked: direction < 0
             ? container.scrollTop + container.clientHeight >= container.scrollHeight - 2
             : container.scrollTop <= 0,
           point: { x: (left + right) / 2, y: (top + bottom) / 2 } };
-      }, { marker: match.marker });
+      }, { marker: match.marker, pixelsPerNotch });
       if (!position.direction) break;
       if (position.blocked) {
-        await muse.log("Row is near a list boundary; cannot center farther. Retaining coverage checks.");
+        await muse.log("Row is at a list boundary and cannot reach the middle; coverage checks still apply.");
         break;
       }
-      if (attempt === 23) throw new Error("Could not position conversation safely after native scrolling.");
-      await muse.log("Moving conversation up into the upper third with native wheel input.");
+      if (attempt === 39) throw new Error("Could not center conversation after native scrolling; stopping.");
+      const ticks = pixelsPerNotch === null ? 1 :
+        Math.max(1, Math.min(6, Math.floor(Math.abs(position.offset) / pixelsPerNotch)));
+      await muse.log(`Centering conversation in the window: ${Math.round(position.offset)} px from middle; wheel ${position.direction * ticks}.`);
       await muse.moveTo({ to: position.point });
-      await muse.scroll(position.direction);
+      await muse.scroll(position.direction * ticks);
       await muse.wait(300);
       await validate(match);
     }
@@ -279,74 +289,18 @@ while (true) {
     throw new Error("Cannot establish scrollable list bounds; scan incomplete.");
   });
   if (scroll.bottom) {
-    await muse.log("Apparent loaded bottom; scrolling up one screen and back down to retrigger loading before checking for more rows.");
-    await muse.moveTo({ to: scroll.point });
-    for (const direction of [1, -1]) {
-      const target = direction > 0 ? Math.max(0, scroll.before - scroll.height) : scroll.before;
-      let completed = false;
-      for (let attempt = 0; attempt < 60; attempt++) {
-        const position = await muse.page(({ url }) => {
-          if (location.href !== url) throw new Error("Left conversation list during bottom recovery.");
-          const element = document.querySelector('[data-muse-old-scroll="target"]');
-          if (!element) throw new Error("Scroll area disappeared during bottom recovery.");
-          return {
-            top: element.scrollTop,
-            bottom: element.scrollTop + element.clientHeight >= element.scrollHeight - 2,
-          };
-        }, { url });
-        if (direction > 0 ? position.top <= target + 2 : position.top >= target - 2 || position.bottom) {
-          completed = true;
-          break;
-        }
-        // Return only to the old bottom; newly loaded rows must be scanned first.
-        const remaining = Math.abs(position.top - target);
-        const ticks = pixelsPerNotch === null ? 3 :
-          Math.max(1, Math.min(6, Math.floor(remaining / pixelsPerNotch)));
-        await muse.scroll(direction * ticks);
-        await muse.wait(300);
-      }
-      if (!completed) throw new Error("Native up/down bottom recovery did not reach its target; scan incomplete.");
-    }
-    await muse.scroll(-1);
-    await muse.log("Up/down recovery finished; checking every second for thirty idle seconds.");
-    let changed = false;
-    let idleChecks = 0;
-    let wasLoading = null;
-    for (let poll = 0; poll < 120 && idleChecks < 30; poll++) {
-    await muse.wait(1000);
-    const settled = await muse.page(({ url, source }) => {
-      if (location.href !== url) throw new Error("Left conversation list during bottom recheck.");
-      const element = document.querySelector('[data-muse-old-scroll="target"]');
-      if (!element) throw new Error("Scroll area disappeared during bottom recheck.");
-      const vis = new Function(`return (${source})`)();
-      return {
-        bottom: element.scrollTop + element.clientHeight >= element.scrollHeight - 2,
-        scrollHeight: element.scrollHeight,
-        rows: [...document.querySelectorAll("a[data-e2e-conversation]")]
-          .map(link => link.getAttribute("href")),
-        loadingIndicators: [...document.querySelectorAll(
-          '[aria-busy="true"], [role="progressbar"], mws-spinner, mat-spinner, mat-progress-spinner, mat-progress-bar'
-        )].filter(indicator => vis(indicator) || [...indicator.querySelectorAll("*")].some(vis))
-          .map(indicator => ({ tag: indicator.tagName.toLowerCase(), class: indicator.getAttribute("class") })),
-      };
-    }, { url, source: sources.visible });
-    const loading = settled.loadingIndicators.length > 0;
-    if (loading !== wasLoading) {
-      await muse.log({ bottomLoading: loading, visibleIndicators: settled.loadingIndicators });
-      wasLoading = loading;
-    }
-    if (!settled.bottom || settled.scrollHeight !== scroll.scrollHeight ||
-        JSON.stringify(settled.rows) !== JSON.stringify(scroll.rows)) {
-      await muse.log("More rows or changed list bounds detected; continuing the scan immediately.");
-      changed = true;
+    if (refreshedPass && archived.length === archivedAtRefresh) {
+      await muse.log("Reached the list bottom after a page refresh with no new matching conversations; stopping.");
       break;
     }
-    idleChecks = loading ? 0 : idleChecks + 1;
-    }
-    if (changed) continue;
-    if (idleChecks < 30) throw new Error("List still loading after two minutes; scan incomplete, not reporting end reached.");
-    await muse.log("No additional rows after thirty consecutive one-second checks without visible loading.");
-    break;
+    await muse.log(refreshedPass
+      ? `Reached the list bottom; ${archived.length - archivedAtRefresh} archived since the last refresh. Refreshing the page and scanning again.`
+      : "Reached the list bottom; refreshing the page and scanning again before stopping.");
+    refreshedPass = true;
+    archivedAtRefresh = archived.length;
+    await loadList();
+    await muse.log("Page refreshed; scanning from the top of the list.");
+    continue;
   }
   await muse.moveTo({ to: scroll.point });
   const ticks = pixelsPerNotch === null ? 1 :
@@ -365,5 +319,5 @@ while (true) {
   pixelsPerNotch = distance / ticks;
   await muse.log(`Native wheel (${ticks} notches): ${scroll.before} -> ${after}. Archived: ${archived.length}.`);
 }
-await muse.log(`Reached list bottom. Confirmed archived: ${archived.length}. Skipped: ${skipped.size}. Unclear dates were not archived.`);
+await muse.log(`Finished after a refreshed pass. Confirmed archived: ${archived.length}. Skipped: ${skipped.size}. Unclear dates were not archived.`);
 return { archived: archived.length, skipped: skipped.size, rule: "three-letter month date or M/D/YY; explicitly unpinned" };

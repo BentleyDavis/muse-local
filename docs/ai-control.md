@@ -235,24 +235,16 @@ list per scroll (up to six notches), preserving overlap. It asks Y/N before
 each of the first five archives per run, while hovering over Archive, then
 continues automatically. N stops the script. Changed identity, pin status, or date stops the
 script; uncertain archive results are never retried automatically.
-Before opening options for each target, rows below the upper third are moved up
-using native wheel input with identity rechecks; rows already higher are not
-moved down. At actual list boundaries, coverage checks still prevent clicking a
+Before opening options for each target, the row is centered vertically in the
+window using native wheel input in either direction, with identity rechecks.
+At actual list boundaries where centering is impossible, coverage checks still prevent clicking a
 covered target. Covered or animating pointer targets are rechecked once per
 second for up to ten seconds before stopping.
-At an apparent loaded bottom it uses measured native wheel input to scroll up
-one visible screen, then back down to the previously reached bottom, followed
-by a wheel nudge to trigger lazy loading. It does not chase a newly extended
-bottom past unscanned rows. Recovery is bounded and fails explicitly if the
-wheel does not reach its target. It then polls every second. Added conversations or changed scroll bounds
-resume scanning immediately. Completion requires thirty consecutive checks
-without visible loading or list changes. Spinner checks include `mws-spinner`
-and its descendants, testing viewport clipping and computed visibility, display,
-and opacity through their ancestors; hidden spinner markup alone is not loading.
-Visible loading resets the idle count. After two minutes without reaching a
-settled state, the script fails explicitly as incomplete rather than reporting
-the end of the list. Loading transitions and visible indicator tags/classes are
-logged for diagnosis.
+When it reaches the bottom of the list, it reloads the conversations page and
+scans again from the top. It stops only after a pass that started with a
+refresh reaches the bottom without archiving anything; any archive during a
+pass triggers another refresh. The reload is confirmed by checking that a
+marker set on the old page is gone before scanning resumes.
 
 The batch currently requires confirmation before each Archive click. The
 script opens the row's menu and hovers over Archive while keeping input locked.
