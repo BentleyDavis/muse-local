@@ -38,9 +38,13 @@ Do not migrate auth without the database or vice versa — one change, once.
 - Firestore layout mirrors today's channel: a `muse` collection holding
   `commands` and `results`. Keep the `muse` name — do not rename it unasked.
 - App side: today's `src/firebase.ts` uses RTDB's REST streaming
-  (EventSource). **Firestore's REST API has no streaming endpoint** — use the
-  Firebase JS SDK (`onSnapshot`) in the TS frontend, or poll. Do not try to
-  port the EventSource approach verbatim.
+  (EventSource). Firestore's raw REST API has no equivalent streaming
+  endpoint — but that doesn't matter, because the Firebase JS SDK's
+  `onSnapshot()` gives true push notifications over a persistent connection.
+  That is the standard approach, it is genuinely real-time (the server pushes
+  changes, typically sub-second), and it is what the TS frontend should use.
+  Do not try to port the EventSource pattern verbatim, and do not poll —
+  `onSnapshot` is the replacement.
 - Keep the `Command` interface and the `FirebaseChannel` API shape so
   `control.ts` doesn't churn.
 - The AI writer side authenticates as its own Firebase user (ID token,
